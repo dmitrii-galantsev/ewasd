@@ -1,0 +1,62 @@
+[project]
+name = "ewasd"
+version = "0.3.0"
+description = "Symlink curated editor/IDE config files into active repositories"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [ { name = "Dmitrii Galantsev" } ]
+keywords = ["developer-experience", "dotfiles", "symlink", "workspace"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+]
+
+[tool.setuptools]
+packages = ["ewasd"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy", "termcolor"]
+color = ["termcolor>=2.4.0"]
+
+[project.scripts]
+ewasd = "ewasd.cli:main"
+
+[tool.ruff]
+line-length = 100
+extend-exclude = [
+    "build",
+    "build-*",
+    "_build",
+    "docs",
+]
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "PL", "RUF"]
+ignore = ["E501", "PLR0911", "PLR0912", "PLR0915", "PLR2004", "PLW2901"]
+[tool.ruff.lint.isort]
+known-first-party = ["ewasd"]
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = true
+line-ending = "auto"
+
+[tool.mypy]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+strict_optional = true
+no_implicit_optional = true
+show_error_codes = true
+pretty = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-q"
+testpaths = ["tests"]
