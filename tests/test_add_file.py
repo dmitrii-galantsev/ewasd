@@ -1,10 +1,9 @@
-"""Tests for --add-file handler (handle_add_file)."""
+"""Tests for --add-file handler."""
 
 from pathlib import Path
 from unittest.mock import patch
 
-from ewasd.cli import handle_add_file
-from ewasd.core import ConfigParser
+from ewasd.core import ConfigParser, add_file_to_repo
 
 
 def _make_workspace(tmp_path: Path, repo_name: str = "myrepo") -> tuple[Path, ConfigParser]:
@@ -30,7 +29,7 @@ class TestAddFileSuccess:
         cwd.mkdir()
         (cwd / "config.yaml").write_text("key: value")
 
-        result = handle_add_file(["config.yaml"], cwd, cfg, "myrepo")
+        result = add_file_to_repo(["config.yaml"], cwd, cfg, "myrepo")
 
         assert result == 0
         # Original location should be a symlink
@@ -46,7 +45,7 @@ class TestAddFileSuccess:
         (cwd / "a.txt").write_text("aaa")
         (cwd / "b.txt").write_text("bbb")
 
-        result = handle_add_file(["a.txt", "b.txt"], cwd, cfg, "myrepo")
+        result = add_file_to_repo(["a.txt", "b.txt"], cwd, cfg, "myrepo")
 
         assert result == 0
         assert (cwd / "a.txt").is_symlink()
@@ -60,7 +59,7 @@ class TestAddFileSuccess:
         cwd.mkdir()
         (cwd / "file.txt").write_text("data")
 
-        handle_add_file(["file.txt"], cwd, cfg, "myrepo")
+        add_file_to_repo(["file.txt"], cwd, cfg, "myrepo")
 
         gitignore = cwd / ".ewasd_gitignore"
         assert gitignore.exists()
@@ -76,7 +75,7 @@ class TestAddFileErrors:
         cwd = tmp_path / "project"
         cwd.mkdir()
 
-        result = handle_add_file(["nonexistent.txt"], cwd, cfg, "myrepo")
+        result = add_file_to_repo(["nonexistent.txt"], cwd, cfg, "myrepo")
 
         assert result == 1
 
@@ -85,7 +84,7 @@ class TestAddFileErrors:
         cwd = tmp_path / "project"
         cwd.mkdir()
 
-        result = handle_add_file(["missing1.txt", "missing2.txt"], cwd, cfg, "myrepo")
+        result = add_file_to_repo(["missing1.txt", "missing2.txt"], cwd, cfg, "myrepo")
 
         assert result == 1
 
@@ -97,7 +96,7 @@ class TestAddFileErrors:
         (cwd / "existing.txt").write_text("local")
         (ws / "repos" / "myrepo" / "existing.txt").write_text("already there")
 
-        result = handle_add_file(["existing.txt"], cwd, cfg, "myrepo")
+        result = add_file_to_repo(["existing.txt"], cwd, cfg, "myrepo")
 
         # Should succeed (0) but skip the already-existing file
         assert result == 0
@@ -116,7 +115,7 @@ class TestAddFileErrors:
             patch("ewasd.core.collect_remotes", return_value=[]),
             patch("ewasd.core.find_repo_name", return_value=None),
         ):
-            result = handle_add_file(["file.txt"], cwd, cfg, None)
+            result = add_file_to_repo(["file.txt"], cwd, cfg, None)
 
         # Should fall back to path-based name extraction, which succeeds
         # (uses last component of cwd: "project")
@@ -133,7 +132,7 @@ class TestAddFileAutoCreate:
         cwd.mkdir()
         (cwd / "config.txt").write_text("data")
 
-        result = handle_add_file(["config.txt"], cwd, cfg, "newproject")
+        result = add_file_to_repo(["config.txt"], cwd, cfg, "newproject")
 
         assert result == 0
         # Verify entry was created in editors.toml
@@ -146,7 +145,7 @@ class TestAddFileAutoCreate:
         cwd.mkdir()
         (cwd / "file.txt").write_text("data")
 
-        result = handle_add_file(["file.txt"], cwd, cfg, "myrepo")
+        result = add_file_to_repo(["file.txt"], cwd, cfg, "myrepo")
 
         assert result == 0
         assert (ws / "repos" / "myrepo" / "file.txt").exists()

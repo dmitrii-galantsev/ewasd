@@ -3,8 +3,8 @@
 import tomllib
 from pathlib import Path
 
-from ewasd.cli import handle_config, handle_init, parse_args
-from ewasd.core import ConfigParser
+from ewasd.cli import handle_config, parse_args
+from ewasd.core import ConfigParser, init_workspace
 
 
 class TestWorkspaceFlag:
@@ -39,7 +39,7 @@ class TestInit:
     def test_init_creates_structure(self, tmp_path: Path):
         """init creates workspace dir, repos/, and starter editors.toml."""
         ws = tmp_path / "new-workspace"
-        handle_init(workspace=str(ws), from_git=None)
+        init_workspace(ws, None)
 
         assert ws.is_dir()
         assert (ws / "repos").is_dir()
@@ -56,7 +56,7 @@ class TestInit:
         ws.mkdir()
         (ws / "editors.toml").write_text('[repos]\n[repos.mine]\nrepo = "x"\nlink_dir = "y"\n')
 
-        handle_init(workspace=str(ws), from_git=None)
+        init_workspace(ws, None)
 
         text = (ws / "editors.toml").read_text()
         assert "mine" in text  # original content preserved
@@ -64,8 +64,8 @@ class TestInit:
     def test_init_idempotent(self, tmp_path: Path):
         """Running init twice is safe."""
         ws = tmp_path / "ws"
-        handle_init(workspace=str(ws), from_git=None)
-        handle_init(workspace=str(ws), from_git=None)
+        init_workspace(ws, None)
+        init_workspace(ws, None)
         assert (ws / "editors.toml").exists()
         assert (ws / "repos").is_dir()
 

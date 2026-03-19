@@ -83,12 +83,6 @@ def handle_completion(shell: str, install: bool) -> int:
         return 0
 
 
-def handle_init(workspace: str | None, from_git: str | None) -> int:
-    """Initialize a new ewasd workspace."""
-    ws = get_workspace_dir(workspace)
-    return init_workspace(ws, from_git)
-
-
 def handle_migrate(
     workspace: str | None, old_workspace: str | None, scan_dir: str | None, dry_run: bool
 ) -> int:
@@ -255,22 +249,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def resolve_command(ns: argparse.Namespace) -> str:
-    return ns.command or "link"
-
-
-def handle_add_file(
-    filenames: list[str], cwd: Path, cfg: ConfigParser, project_override: str | None
-) -> int:
-    """Handle --add-file: move file(s) to central repo and create symlink back."""
-    return add_file_to_repo(filenames, cwd, cfg, project_override)
-
-
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     ns = parse_args(argv)
-    command = resolve_command(ns)
+    command = ns.command or "link"
 
     workspace = getattr(ns, "workspace", None)
 
@@ -281,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ewasd {get_version()}")
         return 0
     if command == "init":
-        return handle_init(workspace, getattr(ns, "from_git", None))
+        return init_workspace(get_workspace_dir(workspace), getattr(ns, "from_git", None))
     if command == "config":
         return handle_config(workspace)
     if command == "migrate":
@@ -305,26 +288,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Handle --add-file first (before repo resolution)
     if getattr(ns, "add_file", None):
-        return handle_add_file(ns.add_file, cwd, cfg, getattr(ns, "project", None))
+        return add_file_to_repo(ns.add_file, cwd, cfg, getattr(ns, "project", None))
 
-    # Monorepo support: if --project is given, use it directly
     trace: list[str] = []
-    if getattr(ns, "project", None):
-        repo_name = detect_repo_name(
-            project_override=ns.project,
-            remotes=collect_remotes(),
-            cwd=cwd,
-            known_repo_names=cfg.repo_names(),
-            trace=trace,
-        )
-    else:
-        repo_name = detect_repo_name(
-            project_override=None,
-            remotes=collect_remotes(),
-            cwd=cwd,
-            known_repo_names=cfg.repo_names(),
-            trace=trace,
-        )
+    repo_name = detect_repo_name(
+        project_override=getattr(ns, "project", None),
+        remotes=collect_remotes(),
+        cwd=cwd,
+        known_repo_names=cfg.repo_names(),
+        trace=trace,
+    )
     if not repo_name:
         warn("Unable to determine repository name. Strategies tried:")
         for t in trace:
