@@ -230,6 +230,26 @@ def test_link_all_tracks_all_symlinks(tmp_path: Path):
     assert ".ewasd_gitignore" in gitignore
 
 
+def test_link_all_dry_run(tmp_path: Path):
+    """Test link_all with dry_run creates no symlinks or gitignore."""
+    src_dir = tmp_path / "source"
+    dst_dir = tmp_path / "target"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+
+    (src_dir / "file1.txt").write_text("a")
+    (src_dir / "file2.txt").write_text("b")
+
+    repo = Repo(name="test", git_url="url", link_dir=src_dir)
+    repo.link_all(dst_dir, dry_run=True)
+
+    # No symlinks should be created
+    assert not (dst_dir / "file1.txt").exists()
+    assert not (dst_dir / "file2.txt").exists()
+    # No gitignore should be written
+    assert not (dst_dir / ".ewasd_gitignore").exists()
+
+
 def test_update_gitignore_monorepo_paths(tmp_path: Path, monkeypatch):
     """Test gitignore uses relative paths for monorepo."""
     src_dir = tmp_path / "source"

@@ -14,6 +14,7 @@ COMPLETIONS = {
         "migrate": "Fix broken symlinks after workspace relocation",
         "completion": "Generate shell completion scripts",
     },
+    "link_options": ["--dry-run", "-n"],
     "clean_options": ["--dry-run", "--directories", "--force", "--extra", "-n", "-d", "-f"],
     "init_options": ["--from-git"],
     "migrate_options": ["--old-workspace", "--scan-dir", "--dry-run", "-n"],
@@ -25,6 +26,7 @@ def generate_bash_completion() -> str:
     """Generate bash completion script."""
     opts = " ".join(COMPLETIONS["main_options"])
     subs = " ".join(COMPLETIONS["subcommands"].keys())
+    link_opts = " ".join(COMPLETIONS["link_options"])
     clean_opts = " ".join(COMPLETIONS["clean_options"])
     init_opts = " ".join(COMPLETIONS["init_options"])
     migrate_opts = " ".join(COMPLETIONS["migrate_options"])
@@ -54,6 +56,10 @@ _ewasd_completion() {{
             return 0
             ;;
         --from-git)
+            return 0
+            ;;
+        link)
+            COMPREPLY=( $(compgen -W "{link_opts}" -- "${{cur}}") )
             return 0
             ;;
         clean)
@@ -91,6 +97,9 @@ _ewasd_completion() {{
                 if [[ ${{cur}} != -* ]]; then
                     COMPREPLY=( $(compgen -W "{shells} --install" -- "${{cur}}") )
                 fi
+                ;;
+            link)
+                COMPREPLY=( $(compgen -W "{link_opts}" -- "${{cur}}") )
                 ;;
             clean)
                 COMPREPLY=( $(compgen -W "{clean_opts}" -- "${{cur}}") )
@@ -131,6 +140,14 @@ def generate_fish_completion() -> str:
     for cmd, desc in COMPLETIONS["subcommands"].items():
         lines.append(f"complete -c ewasd -f -n '__fish_use_subcommand' -a '{cmd}' -d '{desc}'")
     lines.append("")
+
+    # Link options
+    lines.extend(
+        [
+            "complete -c ewasd -f -n '__fish_seen_subcommand_from link' -s n -l dry-run -d 'Show what would be created without making changes'",
+            "",
+        ]
+    )
 
     # Clean options
     lines.extend(
@@ -200,6 +217,10 @@ _ewasd() {{
                     _arguments \\
                         '--install[Install completion to standard location]' \\
                         '1:shell:({shells})'
+                    ;;
+                link)
+                    _arguments \\
+                        '(-n --dry-run){{-n,--dry-run}}'[Show what would be created without making changes]'
                     ;;
                 clean)
                     _arguments \\

@@ -1,8 +1,6 @@
 """Command line interface for ewasd."""
 
 import argparse
-import os
-import shutil
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
@@ -11,14 +9,15 @@ from pathlib import Path
 from .completions import generate_bash_completion, generate_fish_completion, generate_zsh_completion
 from .core import (
     ConfigParser,
+    add_file_to_repo,
     build_git_clean_tokens,
     collect_remotes,
     detect_repo_name,
-    find_repo_name,
     get_config_dir,
     get_remote_keys,
     get_workspace_dir,
-    success,
+    init_workspace,
+    migrate_symlinks,
     warn,
 )
 
@@ -83,76 +82,16 @@ def handle_completion(shell: str, install: bool) -> int:
         return 0
 
 
-STARTER_TOML = """\
-# ewasd workspace configuration
-# Add repos here. Each entry maps a git repo to a directory of config files.
-#
-# [repos.my-project]
-#     repo = "https://github.com/user/my-project.git"
-#     link_dir = "repos/my-project"
-[repos]
-"""
-
-
-def _find_legacy_workspace() -> Path | None:
-    """Check common legacy locations for an existing workspace."""
-    import __main__  # noqa: PLC0415
-
-    candidates = [
-        Path(__main__.__file__).resolve().parent if hasattr(__main__, "__file__") else None,
-        Path(__file__).resolve().parent.parent,
-        Path.home() / "git" / "editor_workspaces",
-        Path.home() / "git" / "ewasd",
-    ]
-    for candidate in candidates:
-        if candidate and (candidate / "editors.toml").exists():
-            return candidate
-    return None
-
-
 def handle_init(workspace: str | None, from_git: str | None) -> int:
     """Initialize a new ewasd workspace."""
     ws = get_workspace_dir(workspace)
-    if from_git:
-        subprocess.run(["git", "clone", from_git, str(ws)], check=True)
-        return 0
-
-    # Check for legacy workspace to migrate from
-    legacy = _find_legacy_workspace()
-    if legacy and legacy.resolve() != ws.resolve() and not (ws / "editors.toml").exists():
-        print(f"Found existing workspace at {legacy}")
-        print(f"Copying to {ws} ...")
-        ws.mkdir(parents=True, exist_ok=True)
-        # Copy editors.toml
-        shutil.copy2(legacy / "editors.toml", ws / "editors.toml")
-        # Copy repos/ directory
-        legacy_repos = legacy / "repos"
-        if legacy_repos.is_dir():
-            dest_repos = ws / "repos"
-            if dest_repos.exists():
-                shutil.rmtree(dest_repos)
-            shutil.copytree(legacy_repos, dest_repos, symlinks=True)
-        success(f"Migrated workspace from {legacy} to {ws}")
-        print("Run 'ewasd migrate --old-workspace " + str(legacy) + "' to fix existing symlinks.")
-        return 0
-
-    ws.mkdir(parents=True, exist_ok=True)
-    (ws / "repos").mkdir(exist_ok=True)
-    toml = ws / "editors.toml"
-    if not toml.exists():
-        toml.write_text(STARTER_TOML)
-    success(f"Initialized workspace at {ws}")
-    return 0
+    return init_workspace(ws, from_git)
 
 
 def handle_migrate(
     workspace: str | None, old_workspace: str | None, scan_dir: str | None, dry_run: bool
 ) -> int:
-    """Fix broken symlinks by repointing them from old workspace to new workspace.
-
-    Recursively scans a directory tree for symlinks whose targets contain the old
-    workspace path and updates them to point to the equivalent path in the new workspace.
-    """
+    """Fix broken symlinks by repointing them from old workspace to new workspace."""
     ws = get_workspace_dir(workspace)
 
     if not old_workspace:
@@ -167,8 +106,6 @@ def handle_migrate(
         return 1
 
     target_dir = Path(scan_dir).resolve() if scan_dir else Path.cwd()
-    old_ws_str = str(old_ws)
-    new_ws_str = str(ws)
 
     print(f"Scanning {target_dir} for symlinks pointing to {old_ws}")
     print(f"Will repoint to {ws}")
@@ -177,34 +114,7 @@ def handle_migrate(
     else:
         print()
 
-    fixed = 0
-    broken = 0
-
-    for item in target_dir.rglob("*"):
-        if not item.is_symlink():
-            continue
-
-        try:
-            link_target = os.readlink(item)
-        except OSError:
-            continue
-
-        if old_ws_str not in link_target:
-            continue
-
-        new_target = link_target.replace(old_ws_str, new_ws_str, 1)
-
-        if Path(new_target).exists():
-            if dry_run:
-                print(f"  Would fix: {item} -> {new_target}")
-            else:
-                item.unlink()
-                item.symlink_to(new_target)
-                success(f"  Fixed: {item} -> {new_target}")
-            fixed += 1
-        else:
-            warn(f"  Cannot fix: {item} -> {link_target} (new target {new_target} not found)")
-            broken += 1
+    fixed, broken = migrate_symlinks(ws, old_ws, target_dir, dry_run)
 
     if dry_run:
         print(f"\nDry run complete. Would fix {fixed} symlink(s).")
@@ -259,7 +169,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     sub = parser.add_subparsers(dest="command", required=False)
 
-    sub.add_parser("link", help="Link all discovered config entries (default action)")
+    link_p = sub.add_parser("link", help="Link all discovered config entries (default action)")
+    link_p.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="Show what symlinks would be created without actually creating them",
+    )
     sub.add_parser("list", help="List config entries for the detected repo")
     sub.add_parser("version", help="Show version information")
     sub.add_parser(
@@ -343,95 +259,7 @@ def handle_add_file(
     filenames: list[str], cwd: Path, cfg: ConfigParser, project_override: str | None
 ) -> int:
     """Handle --add-file: move file(s) to central repo and create symlink back."""
-    # Validate all files exist first
-    missing_files = []
-    for filename in filenames:
-        file_path = cwd / filename
-        if not file_path.exists():
-            missing_files.append(filename)
-
-    if missing_files:
-        for filename in missing_files:
-            warn(f"File {filename} does not exist in current directory")
-        return 1
-
-    # Determine repo name - be more permissive for --add-file
-    if project_override:
-        repo_name = project_override
-    else:
-        # Try normal detection first
-        repo_name = detect_repo_name(
-            project_override=None,
-            remotes=collect_remotes(),
-            cwd=cwd,
-            known_repo_names=cfg.repo_names(),
-        )
-
-        # If that fails, try to extract from remote or path without known_repo_names constraint
-        if not repo_name:
-            # Try remote URL first (priority for --add-file)
-            remotes = collect_remotes()
-            if remotes:
-                repo_name = find_repo_name(remotes)
-
-            # If still no luck, extract from path components (last non-empty component)
-            if not repo_name:
-                path_parts = [p for p in cwd.parts if p and p != "/"]
-                if path_parts:
-                    repo_name = path_parts[-1]
-
-    if not repo_name:
-        warn("Unable to determine repository name for --add-file operation")
-        warn("Please use --project <name> to specify explicitly")
-        return 1
-
-    # Ensure project exists in config
-    try:
-        repo = cfg.get_repo(repo_name)
-    except KeyError:
-        # Auto-create project entry
-        print(f"Project '{repo_name}' not found in config. Creating...")
-        repo = cfg.create_repo_entry(repo_name, cwd)
-        if not repo:
-            warn(f"Failed to create project entry for '{repo_name}'")
-            return 1
-        success(f"Created project entry: {repo_name} -> {repo.link_dir}")
-    except Exception as exc:
-        warn(str(exc))
-        return 1
-
-    # Ensure target directory exists
-    repo.link_dir.mkdir(parents=True, exist_ok=True)
-
-    # Process each file
-    successfully_added = []
-
-    for filename in filenames:
-        file_path = cwd / filename
-        target_path = repo.link_dir / filename
-
-        if target_path.exists():
-            warn(f"File {filename} already exists in central repo at {target_path}")
-            continue
-
-        # Ensure parent directories exist for the target
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        print(f"Moving {file_path} -> {target_path}")
-        shutil.move(str(file_path), str(target_path))
-
-        # Create symlink back
-        print(f"Creating symlink {file_path} -> {target_path}")
-        file_path.symlink_to(target_path)
-
-        successfully_added.append(filename)
-        success(f"Successfully added {filename} to central repo and created symlink")
-
-    # Update git configuration to ignore the newly added symlinks
-    if successfully_added:
-        repo.update_gitignore(cwd, successfully_added)
-
-    return 0
+    return add_file_to_repo(filenames, cwd, cfg, project_override)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -491,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         repo = cfg.get_repo(repo_name)
-    except Exception as exc:
+    except (KeyError, ValueError) as exc:
         warn(str(exc))
         return 1
 
@@ -506,9 +334,16 @@ def main(argv: list[str] | None = None) -> int:
         print(" ".join(tokens))
         return 0
     if command == "link":
-        print("Attempting link:")
-        repo.link_all(cwd)
-        print("Done!")
+        dry_run = getattr(ns, "dry_run", False)
+        if dry_run:
+            print("Dry run - showing planned operations:")
+        else:
+            print("Attempting link:")
+        repo.link_all(cwd, dry_run=dry_run)
+        if dry_run:
+            print("Dry run complete. No changes made.")
+        else:
+            print("Done!")
         return 0
     if command == "clean":
         # Build base args replicating prior usage: git clean -fdx plus exclusions

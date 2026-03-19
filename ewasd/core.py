@@ -5,6 +5,7 @@ Separable from CLI so it can be imported and unit tested.
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
@@ -113,10 +114,12 @@ class Repo:
             entries.append(child.name)
         return entries
 
-    def link_directory(self, src_dir: Path, dst_dir: Path, rel_prefix: str = "") -> list[str]:
+    def link_directory(
+        self, src_dir: Path, dst_dir: Path, rel_prefix: str = "", *, dry_run: bool = False
+    ) -> list[str]:
         """Recursively link files from src_dir into dst_dir.
 
-        Returns list of relative paths that were symlinked.
+        Returns list of relative paths that were (or would be) symlinked.
         """
         linked_paths: list[str] = []
 
@@ -134,12 +137,17 @@ class Repo:
             if src_item.is_dir():
                 if dst_item.exists() and dst_item.is_dir():
                     # Both are directories, recurse
-                    nested_paths = self.link_directory(src_item, dst_item, f"{rel_path}/")
+                    nested_paths = self.link_directory(
+                        src_item, dst_item, f"{rel_path}/", dry_run=dry_run
+                    )
                     linked_paths.extend(nested_paths)
                 elif not dst_item.exists():
                     # Target dir doesn't exist, symlink the whole directory
-                    success(f"Linked {src_item} to {dst_item}")
-                    dst_item.symlink_to(src_item)
+                    if dry_run:
+                        print(f"  Would link {src_item} -> {dst_item}")
+                    else:
+                        success(f"Linked {src_item} to {dst_item}")
+                        dst_item.symlink_to(src_item)
                     linked_paths.append(rel_path)
                 # If dst_item exists but is a file, skip with warning
                 elif dst_item.is_file():
@@ -153,16 +161,19 @@ class Repo:
                 warn(f"File exists! Skipping {rel_path}")
             else:
                 # Link the file
-                success(f"Linked {src_item} to {dst_item}")
-                dst_item.symlink_to(src_item)
+                if dry_run:
+                    print(f"  Would link {src_item} -> {dst_item}")
+                else:
+                    success(f"Linked {src_item} to {dst_item}")
+                    dst_item.symlink_to(src_item)
                 linked_paths.append(rel_path)
 
         return linked_paths
 
-    def link_any(self, target_name: str, cwd: Path) -> list[str]:
+    def link_any(self, target_name: str, cwd: Path, *, dry_run: bool = False) -> list[str]:
         """Link a single config entry (file or directory).
 
-        Returns list of relative paths that were symlinked.
+        Returns list of relative paths that were (or would be) symlinked.
         """
         src = self.link_dir / target_name
         dst = cwd / target_name
@@ -178,14 +189,17 @@ class Repo:
                 return [target_name]
             elif dst.exists() and dst.is_dir():
                 # Both are directories - recurse into it
-                return self.link_directory(src, dst, f"{target_name}/")
+                return self.link_directory(src, dst, f"{target_name}/", dry_run=dry_run)
             elif dst.exists():
                 warn(f"File exists where directory expected! Skipping {target_name}")
                 return []
             else:
                 # Target dir doesn't exist, symlink whole directory
-                success(f"Linked {src} to {dst}")
-                dst.symlink_to(src)
+                if dry_run:
+                    print(f"  Would link {src} -> {dst}")
+                else:
+                    success(f"Linked {src} to {dst}")
+                    dst.symlink_to(src)
                 return [target_name]
 
         # Handle files
@@ -195,8 +209,11 @@ class Repo:
         if dst.exists():
             warn(f"File exists! Skipping {target_name}")
             return []
-        success(f"Linked {src} to {dst}")
-        dst.symlink_to(src)
+        if dry_run:
+            print(f"  Would link {src} -> {dst}")
+        else:
+            success(f"Linked {src} to {dst}")
+            dst.symlink_to(src)
         return [target_name]
 
     def update_gitignore(self, cwd: Path, linked_items: list[str]) -> None:
@@ -223,7 +240,7 @@ class Repo:
                 if resolved_cwd != git_root:
                     rel = resolved_cwd.relative_to(git_root)
                     path_prefix = str(rel) + "/"
-        except Exception:
+        except (OSError, subprocess.CalledProcessError):
             pass
 
         # Write local .ewasd_gitignore with this project's entries
@@ -250,9 +267,9 @@ class Repo:
                             # Skip comments and empty lines
                             if line and not line.startswith("#"):
                                 all_entries.add(line)
-                    except Exception:
+                    except OSError:
                         pass
-            except Exception:
+            except OSError:
                 pass
 
             # Also include the root gitignore file itself
@@ -279,16 +296,17 @@ class Repo:
                 check=True,
                 capture_output=True,
             )
-        except Exception as e:
+        except (OSError, subprocess.CalledProcessError) as e:
             warn(f"Failed to configure git excludes file: {e}")
 
-    def link_all(self, cwd: Path) -> None:
+    def link_all(self, cwd: Path, *, dry_run: bool = False) -> None:
         linked_items = []
         for cfg in self.get_configs():
-            paths = self.link_any(cfg, cwd)
+            paths = self.link_any(cfg, cwd, dry_run=dry_run)
             linked_items.extend(paths)
         # Auto-update gitignore with only successfully linked items
-        self.update_gitignore(cwd, linked_items)
+        if not dry_run:
+            self.update_gitignore(cwd, linked_items)
 
     def iter_git_clean_args(self) -> Iterable[str]:
         # Produces tokens suitable for: git clean -fdx $(ewasd git-clean-args)
@@ -336,7 +354,7 @@ class ConfigParser:
         try:
             remotes = collect_remotes()
             git_url = remotes[0] if remotes else f"https://example.com/{name}.git"
-        except Exception:  # pragma: no cover
+        except (OSError, subprocess.CalledProcessError):  # pragma: no cover
             git_url = f"https://example.com/{name}.git"
 
         # Determine link_dir based on existing patterns or default
@@ -379,7 +397,7 @@ class ConfigParser:
             link_dir = self.workspace_dir / link_dir_raw
             return Repo(name=name, git_url=git_url, link_dir=link_dir)
 
-        except Exception as e:  # pragma: no cover
+        except (OSError, tomllib.TOMLDecodeError) as e:  # pragma: no cover
             warn(f"Failed to write to {self.toml_path}: {e}")
             return None
 
@@ -394,7 +412,7 @@ def collect_remotes() -> list[str]:
             url = result.stdout.strip()
             if url:
                 out.append(url)
-        except Exception:
+        except OSError:
             pass
     return out
 
@@ -455,7 +473,7 @@ def detect_repo_name(
         ).strip()
         if out:
             git_root = Path(out)
-    except Exception:  # pragma: no cover - non-critical
+    except (OSError, subprocess.CalledProcessError):  # pragma: no cover - non-critical
         pass
     path_match = find_repo_name_in_path(cwd, known_repo_names, git_root)
     if path_match:
@@ -466,3 +484,173 @@ def detect_repo_name(
     if remote_match and remote_match in known_repo_names:
         return remote_match
     return None
+
+
+STARTER_TOML = """\
+# ewasd workspace configuration
+# Add repos here. Each entry maps a git repo to a directory of config files.
+#
+# [repos.my-project]
+#     repo = "https://github.com/user/my-project.git"
+#     link_dir = "repos/my-project"
+[repos]
+"""
+
+
+def find_legacy_workspace() -> Path | None:
+    """Check common legacy locations for an existing workspace."""
+    import __main__  # noqa: PLC0415
+
+    candidates = [
+        Path(__main__.__file__).resolve().parent if hasattr(__main__, "__file__") else None,
+        Path(__file__).resolve().parent.parent,
+        Path.home() / "git" / "editor_workspaces",
+        Path.home() / "git" / "ewasd",
+    ]
+    for candidate in candidates:
+        if candidate and (candidate / "editors.toml").exists():
+            return candidate
+    return None
+
+
+def init_workspace(ws: Path, from_git: str | None) -> int:
+    """Initialize a new ewasd workspace. Returns exit code."""
+    if from_git:
+        subprocess.run(["git", "clone", from_git, str(ws)], check=True)
+        return 0
+
+    legacy = find_legacy_workspace()
+    if legacy and legacy.resolve() != ws.resolve() and not (ws / "editors.toml").exists():
+        print(f"Found existing workspace at {legacy}")
+        print(f"Copying to {ws} ...")
+        ws.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy / "editors.toml", ws / "editors.toml")
+        legacy_repos = legacy / "repos"
+        if legacy_repos.is_dir():
+            dest_repos = ws / "repos"
+            if dest_repos.exists():
+                shutil.rmtree(dest_repos)
+            shutil.copytree(legacy_repos, dest_repos, symlinks=True)
+        success(f"Migrated workspace from {legacy} to {ws}")
+        print("Run 'ewasd migrate --old-workspace " + str(legacy) + "' to fix existing symlinks.")
+        return 0
+
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "repos").mkdir(exist_ok=True)
+    toml = ws / "editors.toml"
+    if not toml.exists():
+        toml.write_text(STARTER_TOML)
+    success(f"Initialized workspace at {ws}")
+    return 0
+
+
+def migrate_symlinks(
+    ws: Path, old_ws: Path, target_dir: Path, dry_run: bool
+) -> tuple[int, int]:
+    """Fix broken symlinks by repointing from old workspace to new workspace.
+
+    Returns (fixed_count, broken_count).
+    """
+    old_ws_str = str(old_ws)
+    new_ws_str = str(ws)
+    fixed = 0
+    broken = 0
+
+    for item in target_dir.rglob("*"):
+        if not item.is_symlink():
+            continue
+        try:
+            link_target = os.readlink(item)
+        except OSError:
+            continue
+        if old_ws_str not in link_target:
+            continue
+        new_target = link_target.replace(old_ws_str, new_ws_str, 1)
+        if Path(new_target).exists():
+            if dry_run:
+                print(f"  Would fix: {item} -> {new_target}")
+            else:
+                item.unlink()
+                item.symlink_to(new_target)
+                success(f"  Fixed: {item} -> {new_target}")
+            fixed += 1
+        else:
+            warn(f"  Cannot fix: {item} -> {link_target} (new target {new_target} not found)")
+            broken += 1
+
+    return fixed, broken
+
+
+def add_file_to_repo(
+    filenames: list[str],
+    cwd: Path,
+    cfg: "ConfigParser",
+    project_override: str | None,
+) -> int:
+    """Move file(s) to central repo and create symlink back. Returns exit code."""
+    # Validate all files exist first
+    missing_files = [f for f in filenames if not (cwd / f).exists()]
+    if missing_files:
+        for filename in missing_files:
+            warn(f"File {filename} does not exist in current directory")
+        return 1
+
+    # Determine repo name
+    if project_override:
+        repo_name = project_override
+    else:
+        repo_name = detect_repo_name(
+            project_override=None,
+            remotes=collect_remotes(),
+            cwd=cwd,
+            known_repo_names=cfg.repo_names(),
+        )
+        if not repo_name:
+            remotes = collect_remotes()
+            if remotes:
+                repo_name = find_repo_name(remotes)
+            if not repo_name:
+                path_parts = [p for p in cwd.parts if p and p != "/"]
+                if path_parts:
+                    repo_name = path_parts[-1]
+
+    if not repo_name:
+        warn("Unable to determine repository name for --add-file operation")
+        warn("Please use --project <name> to specify explicitly")
+        return 1
+
+    # Ensure project exists in config
+    try:
+        repo = cfg.get_repo(repo_name)
+    except KeyError:
+        print(f"Project '{repo_name}' not found in config. Creating...")
+        repo = cfg.create_repo_entry(repo_name, cwd)
+        if not repo:
+            warn(f"Failed to create project entry for '{repo_name}'")
+            return 1
+        success(f"Created project entry: {repo_name} -> {repo.link_dir}")
+    except ValueError as exc:
+        warn(str(exc))
+        return 1
+
+    repo.link_dir.mkdir(parents=True, exist_ok=True)
+
+    successfully_added = []
+    for filename in filenames:
+        file_path = cwd / filename
+        target_path = repo.link_dir / filename
+        if target_path.exists():
+            warn(f"File {filename} already exists in central repo at {target_path}")
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Moving {file_path} -> {target_path}")
+        shutil.move(str(file_path), str(target_path))
+        print(f"Creating symlink {file_path} -> {target_path}")
+        file_path.symlink_to(target_path)
+        successfully_added.append(filename)
+        success(f"Successfully added {filename} to central repo and created symlink")
+
+    if successfully_added:
+        repo.update_gitignore(cwd, successfully_added)
+
+    return 0
