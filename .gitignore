@@ -1,54 +1,20 @@
-# Python cache and build artifacts
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
-MANIFEST
+dist/
+build/
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
+# Test / coverage
 .pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Virtual environments
-.env
-.venv
-env/
+.venv/
 venv/
-ENV/
-env.bak/
-venv.bak/
 
 # IDEs and editors
 .vscode/
@@ -56,23 +22,15 @@ venv.bak/
 *.swp
 *.swo
 *~
+.clangd
 
 # OS files
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
 
-# Existing project-specific ignores
-.mypy_cache
+# Project-specific
 .aider.tags.cache.v4/
-
-# Per-machine / personal config files
+.claude/
 AGENT_CODE_INFO.md
 CLAUDE.md
 TODO.md
-.clangd
-.claude/
