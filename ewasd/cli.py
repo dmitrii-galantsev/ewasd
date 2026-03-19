@@ -11,6 +11,7 @@ from .core import (
     ConfigParser,
     add_file_to_repo,
     build_git_clean_tokens,
+    check_symlink_health,
     collect_remotes,
     detect_repo_name,
     get_config_dir,
@@ -218,6 +219,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     # Config command
     sub.add_parser("config", help="Show resolved configuration paths and settings")
 
+    # Doctor command
+    sub.add_parser("doctor", help="Check symlink health and report broken/stale links")
+
     # Migrate command
     migrate_p = sub.add_parser("migrate", help="Fix broken symlinks after workspace relocation")
     migrate_p.add_argument(
@@ -304,17 +308,27 @@ def main(argv: list[str] | None = None) -> int:
         return handle_add_file(ns.add_file, cwd, cfg, getattr(ns, "project", None))
 
     # Monorepo support: if --project is given, use it directly
+    trace: list[str] = []
     if getattr(ns, "project", None):
-        repo_name = ns.project
+        repo_name = detect_repo_name(
+            project_override=ns.project,
+            remotes=collect_remotes(),
+            cwd=cwd,
+            known_repo_names=cfg.repo_names(),
+            trace=trace,
+        )
     else:
         repo_name = detect_repo_name(
             project_override=None,
             remotes=collect_remotes(),
             cwd=cwd,
             known_repo_names=cfg.repo_names(),
+            trace=trace,
         )
     if not repo_name:
-        warn("Unable to determine repository name (remote + path + override all failed)")
+        warn("Unable to determine repository name. Strategies tried:")
+        for t in trace:
+            warn(f"  - {t}")
         return 1
 
     try:
@@ -325,6 +339,22 @@ def main(argv: list[str] | None = None) -> int:
 
     # cwd already captured above
 
+    if command == "doctor":
+        results = check_symlink_health(cwd, repo)
+        if not results:
+            print("No symlinks found to check.")
+            return 0
+        broken = [r for r in results if not r.ok]
+        ok_count = len(results) - len(broken)
+        for r in results:
+            if r.ok:
+                print(f"  OK: {r.path}")
+            elif r.reason == "broken":
+                print(f"  BROKEN: {r.path} -> {r.target} (target missing)")
+            elif r.reason == "wrong_target":
+                print(f"  WRONG:  {r.path} -> {r.target} (expected to point into workspace)")
+        print(f"\n{ok_count} ok, {len(broken)} problem(s)")
+        return 1 if broken else 0
     if command == "list":
         for c in repo.get_configs():
             print(c)

@@ -5,6 +5,8 @@ repository into individual project working directories.
 """
 
 from .core import (
+    GITIGNORE_FILENAME,
+    IGNORED_VCS_DIRS,
     ConfigParser,
     Repo,
     add_file_to_repo,
@@ -18,6 +20,8 @@ from .core import (
 )
 
 __all__ = [
+    "GITIGNORE_FILENAME",
+    "IGNORED_VCS_DIRS",
     "ConfigParser",
     "Repo",
     "add_file_to_repo",

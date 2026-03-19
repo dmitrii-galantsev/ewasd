@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 import ewasd.core
 from ewasd.core import (
     ConfigParser,
@@ -211,6 +213,48 @@ class TestConfigParserWorkspace:
         # Verify it was written to workspace toml
         text = (ws / "editors.toml").read_text()
         assert "newrepo" in text
+
+
+class TestConfigParserValidation:
+    """Verify eager TOML validation in ConfigParser.__init__."""
+
+    def test_missing_repo_field(self, tmp_path: Path):
+        """Repo entry missing 'repo' raises ValueError on init."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "editors.toml").write_text(
+            '[repos]\n[repos.bad]\nlink_dir = "repos/bad"\n'
+        )
+        with pytest.raises(ValueError, match=r"missing required field.*repo"):
+            ConfigParser(workspace_dir=ws)
+
+    def test_missing_link_dir_field(self, tmp_path: Path):
+        """Repo entry missing 'link_dir' raises ValueError on init."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "editors.toml").write_text(
+            '[repos]\n[repos.bad]\nrepo = "https://example.com/bad.git"\n'
+        )
+        with pytest.raises(ValueError, match=r"missing required field.*link_dir"):
+            ConfigParser(workspace_dir=ws)
+
+    def test_valid_entries_pass(self, tmp_path: Path):
+        """Valid entries don't raise."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "editors.toml").write_text(
+            '[repos]\n[repos.good]\nrepo = "https://example.com/good.git"\nlink_dir = "repos/good"\n'
+        )
+        cfg = ConfigParser(workspace_dir=ws)
+        assert "good" in cfg.repo_names()
+
+    def test_empty_repos_table_passes(self, tmp_path: Path):
+        """Empty [repos] table is valid."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "editors.toml").write_text("[repos]\n")
+        cfg = ConfigParser(workspace_dir=ws)
+        assert cfg.repo_names() == []
 
 
 class TestLegacyFallback:

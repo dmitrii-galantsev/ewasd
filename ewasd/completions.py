@@ -12,6 +12,7 @@ COMPLETIONS = {
         "init": "Initialize a new ewasd workspace",
         "config": "Show resolved configuration paths and settings",
         "migrate": "Fix broken symlinks after workspace relocation",
+        "doctor": "Check symlink health and report broken/stale links",
         "completion": "Generate shell completion scripts",
     },
     "link_options": ["--dry-run", "-n"],

@@ -3,6 +3,7 @@ from pathlib import Path
 from ewasd.core import (
     Repo,
     build_git_clean_tokens,
+    check_symlink_health,
     detect_repo_name,
     find_repo_name,
     find_repo_name_in_path,
@@ -279,3 +280,62 @@ def test_update_gitignore_monorepo_paths(tmp_path: Path, monkeypatch):
     assert "projects/myproject/.ewasd_gitignore" in gitignore
     assert "projects/myproject/config.txt" in gitignore
     assert "projects/myproject/subdir/file.md" in gitignore
+
+
+def test_check_symlink_health_ok(tmp_path: Path):
+    """Healthy symlinks are reported as ok."""
+    src_dir = tmp_path / "source"
+    dst_dir = tmp_path / "target"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+
+    (src_dir / "config.txt").write_text("content")
+    (dst_dir / "config.txt").symlink_to(src_dir / "config.txt")
+
+    repo = Repo(name="test", git_url="url", link_dir=src_dir)
+    results = check_symlink_health(dst_dir, repo)
+
+    assert len(results) == 1
+    assert results[0].ok
+    assert results[0].reason == "ok"
+
+
+def test_check_symlink_health_broken(tmp_path: Path):
+    """Broken symlinks are detected."""
+    src_dir = tmp_path / "source"
+    dst_dir = tmp_path / "target"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+
+    (src_dir / "config.txt").write_text("content")
+    # Create symlink to a non-existent target
+    (dst_dir / "config.txt").symlink_to(tmp_path / "nonexistent")
+
+    repo = Repo(name="test", git_url="url", link_dir=src_dir)
+    results = check_symlink_health(dst_dir, repo)
+
+    assert len(results) == 1
+    assert not results[0].ok
+    assert results[0].reason == "broken"
+
+
+def test_check_symlink_health_wrong_target(tmp_path: Path):
+    """Symlinks pointing to wrong target are detected."""
+    src_dir = tmp_path / "source"
+    dst_dir = tmp_path / "target"
+    wrong_dir = tmp_path / "wrong"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+    wrong_dir.mkdir()
+
+    (src_dir / "config.txt").write_text("correct")
+    (wrong_dir / "config.txt").write_text("wrong")
+    # Create symlink to wrong location
+    (dst_dir / "config.txt").symlink_to(wrong_dir / "config.txt")
+
+    repo = Repo(name="test", git_url="url", link_dir=src_dir)
+    results = check_symlink_health(dst_dir, repo)
+
+    assert len(results) == 1
+    assert not results[0].ok
+    assert results[0].reason == "wrong_target"
