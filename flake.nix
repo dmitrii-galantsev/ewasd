@@ -13,7 +13,7 @@
 
       mkEwasd = pkgs: pkgs.python3Packages.buildPythonApplication {
         pname = "ewasd";
-        version = "0.4.0";
+        version = "0.5.0";
         pyproject = true;
 
         src = ./.;
@@ -29,7 +29,7 @@
 
         meta = {
           description = "Symlink curated editor/IDE config files into active repositories";
-          homepage = "https://github.com/dmitrii-galantsev/editor_workspaces";
+          homepage = "https://github.com/dmitrii-galantsev/ewasd";
           license = pkgs.lib.licenses.mit;
           mainProgram = "ewasd";
         };
