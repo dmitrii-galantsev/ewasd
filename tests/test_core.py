@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import ewasd.core as core_mod
 from ewasd.core import (
     Repo,
     build_git_clean_tokens,
@@ -249,6 +250,65 @@ def test_link_all_dry_run(tmp_path: Path):
     assert not (dst_dir / "file2.txt").exists()
     # No gitignore should be written
     assert not (dst_dir / ".ewasd_gitignore").exists()
+
+
+def test_add_file_preserves_existing_gitignore_entries(tmp_path: Path, monkeypatch):
+    """Regression: --add-file must not overwrite .ewasd_gitignore, losing previous entries.
+
+    Simulates: ewasd link (creates gitignore with several files), then
+    ewasd --add-file newfile.sh (must keep all previous entries).
+    """
+
+    src_dir = tmp_path / "source"
+    dst_dir = tmp_path / "target"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+
+    def fake_check_output(cmd, cwd=None, text=None):
+        if cmd[:2] == ["git", "rev-parse"]:
+            return str(dst_dir)
+        raise RuntimeError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr("subprocess.check_output", fake_check_output)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
+
+    repo = Repo(name="test", git_url="url", link_dir=src_dir)
+
+    # Set up pre-existing symlinks (as if `ewasd link` ran previously)
+    for name in ["file1.txt", "file2.txt", ".clangd"]:
+        (src_dir / name).write_text("content")
+        (dst_dir / name).symlink_to(src_dir / name)
+
+    # Write initial gitignore via link_all-style call
+    repo.update_gitignore(dst_dir, ["file1.txt", "file2.txt", ".clangd"])
+    gitignore = (dst_dir / ".ewasd_gitignore").read_text()
+    assert "file1.txt" in gitignore
+    assert "file2.txt" in gitignore
+    assert ".clangd" in gitignore
+
+    # Now simulate --add-file: create a new file and call add_file_to_repo
+    (dst_dir / "newfile.sh").write_text("#!/bin/bash\necho hi")
+
+    # Minimal ConfigParser mock that returns our repo
+    class FakeCfg:
+        def repo_names(self):
+            return ["test"]
+
+        def get_repo(self, name):
+            return repo
+
+    monkeypatch.setattr(core_mod, "collect_remotes", lambda: [])
+    monkeypatch.setattr(core_mod, "detect_repo_name", lambda **kw: "test")
+
+    core_mod.add_file_to_repo(["newfile.sh"], dst_dir, FakeCfg(), project_override=None)
+
+    # Verify gitignore has both new and old entries
+    gitignore = (dst_dir / ".ewasd_gitignore").read_text()
+    assert "newfile.sh" in gitignore
+    assert "file1.txt" in gitignore
+    assert "file2.txt" in gitignore
+    assert ".clangd" in gitignore
+    assert ".ewasd_gitignore" in gitignore
 
 
 def test_update_gitignore_monorepo_paths(tmp_path: Path, monkeypatch):
