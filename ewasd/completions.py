@@ -43,6 +43,24 @@ _ewasd_completion() {{
     opts="{opts}"
     subcommands="{subs}"
 
+    # --add-file takes nargs="+", so keep completing files for every position
+    # after --add-file until another --flag appears.
+    local i in_add_file=0
+    for ((i=COMP_CWORD-1; i>=1; i--)); do
+        local w="${{COMP_WORDS[i]}}"
+        if [[ "$w" == "--add-file" ]]; then
+            in_add_file=1
+            break
+        fi
+        if [[ "$w" == --* ]]; then
+            break
+        fi
+    done
+    if [[ $in_add_file -eq 1 ]]; then
+        COMPREPLY=( $(compgen -f -- "${{cur}}") )
+        return 0
+    fi
+
     case "${{prev}}" in
         completion)
             COMPREPLY=( $(compgen -W "{shells}" -- "${{cur}}") )
@@ -132,14 +150,20 @@ def generate_fish_completion() -> str:
         [
             "complete -c ewasd -l workspace -d 'Path to ewasd workspace directory' -r -a '(__fish_complete_directories)'",
             "complete -c ewasd -l project -d 'Explicitly specify the project name'",
-            "complete -c ewasd -l add-file -d 'Move file(s) to central repo and create symlink' -F",
+            "complete -c ewasd -l add-file -d 'Move file(s) to central repo and create symlink' -r -F",
+            # --add-file accepts multiple files (argparse nargs='+'); keep completing files",
+            # for all subsequent positions once --add-file has been seen on the command line.",
+            "complete -c ewasd -n '__fish_seen_argument -l add-file' -F",
             "",
         ]
     )
 
-    # Subcommands
+    # Subcommands. Suppress when --add-file is on the line: --add-file is mutually
+    # exclusive with subcommands, and the -f on these rules would otherwise stop
+    # file completion at 'ewasd --add-file <TAB>'.
+    sub_cond = "__fish_use_subcommand; and not __fish_seen_argument -l add-file"
     for cmd, desc in COMPLETIONS["subcommands"].items():
-        lines.append(f"complete -c ewasd -f -n '__fish_use_subcommand' -a '{cmd}' -d '{desc}'")
+        lines.append(f"complete -c ewasd -f -n '{sub_cond}' -a '{cmd}' -d '{desc}'")
     lines.append("")
 
     # Link options

@@ -17,7 +17,18 @@ class TestCompletionsData:
         assert "--add-file" in COMPLETIONS["main_options"]
 
     def test_subcommands_present(self):
-        expected = {"link", "list", "version", "git-clean-args", "clean", "init", "config", "migrate", "doctor", "completion"}
+        expected = {
+            "link",
+            "list",
+            "version",
+            "git-clean-args",
+            "clean",
+            "init",
+            "config",
+            "migrate",
+            "doctor",
+            "completion",
+        }
         assert set(COMPLETIONS["subcommands"].keys()) == expected
 
     def test_completion_shells(self):

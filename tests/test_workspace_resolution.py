@@ -222,9 +222,7 @@ class TestConfigParserValidation:
         """Repo entry missing 'repo' raises ValueError on init."""
         ws = tmp_path / "ws"
         ws.mkdir()
-        (ws / "editors.toml").write_text(
-            '[repos]\n[repos.bad]\nlink_dir = "repos/bad"\n'
-        )
+        (ws / "editors.toml").write_text('[repos]\n[repos.bad]\nlink_dir = "repos/bad"\n')
         with pytest.raises(ValueError, match=r"missing required field.*repo"):
             ConfigParser(workspace_dir=ws)
 

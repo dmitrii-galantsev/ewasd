@@ -186,6 +186,20 @@ class Repo:
             return []
         return [c.name for c in sorted(self.link_dir.iterdir()) if c.name not in IGNORED_VCS_DIRS]
 
+    def iter_all_files(self) -> list[str]:
+        """Return all file paths under link_dir as POSIX-relative strings, excluding VCS dirs."""
+        if not self.link_dir.exists():
+            warn(f"Directory {self.link_dir} does not exist")
+            return []
+        out: list[str] = []
+        for sub in sorted(self.link_dir.rglob("*")):
+            rel_parts = sub.relative_to(self.link_dir).parts
+            if any(p in IGNORED_VCS_DIRS for p in rel_parts):
+                continue
+            if sub.is_file():
+                out.append(sub.relative_to(self.link_dir).as_posix())
+        return out
+
     def link_directory(
         self, src_dir: Path, dst_dir: Path, rel_prefix: str = "", *, dry_run: bool = False
     ) -> list[str]:
@@ -673,12 +687,24 @@ def add_file_to_repo(
 
     repo.link_dir.mkdir(parents=True, exist_ok=True)
 
-    successfully_added = []
+    successfully_added: list[str] = []
+    already_linked: list[str] = []
     for filename in filenames:
         file_path = cwd / filename
         target_path = repo.link_dir / filename
         if target_path.exists():
-            warn(f"File {filename} already exists in central repo at {target_path}")
+            if file_path.is_symlink():
+                try:
+                    if Path(os.readlink(file_path)).resolve() == target_path.resolve():
+                        print(f"Already linked: {filename}")
+                        already_linked.append(filename)
+                        continue
+                except OSError:
+                    pass
+            warn(
+                f"File {filename} already exists in central repo at {target_path}; "
+                f"local {file_path} is not a symlink to it. Skipping."
+            )
             continue
         target_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Moving {file_path} -> {target_path}")
@@ -688,16 +714,28 @@ def add_file_to_repo(
         successfully_added.append(filename)
         success(f"Successfully added {filename} to central repo and created symlink")
 
-    if successfully_added:
-        # Gather all existing ewasd symlinks so update_gitignore gets the full list,
-        # not just the newly added files (which would overwrite previous entries).
-        all_linked = list(successfully_added)
-        link_dir_str = str(repo.link_dir)
-        for item in cwd.iterdir():
-            if item.name in successfully_added or item.name == GITIGNORE_FILENAME:
+    tracked = successfully_added + already_linked
+    if tracked:
+        all_linked: set[str] = set(tracked)
+        link_dir_resolved = repo.link_dir.resolve()
+        for item in cwd.rglob("*"):
+            if not item.is_symlink():
                 continue
-            if item.is_symlink() and link_dir_str in str(os.readlink(item)):
-                all_linked.append(item.name)
-        repo.update_gitignore(cwd, all_linked)
+            rel_parts = item.relative_to(cwd).parts
+            if any(p in IGNORED_VCS_DIRS for p in rel_parts):
+                continue
+            try:
+                tgt = Path(os.readlink(item))
+                tgt = (item.parent / tgt).resolve() if not tgt.is_absolute() else tgt.resolve()
+            except OSError:
+                continue
+            try:
+                tgt.relative_to(link_dir_resolved)
+            except ValueError:
+                continue
+            rel = item.relative_to(cwd).as_posix()
+            if rel != GITIGNORE_FILENAME:
+                all_linked.add(rel)
+        repo.update_gitignore(cwd, sorted(all_linked))
 
     return 0

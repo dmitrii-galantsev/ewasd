@@ -329,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{ok_count} ok, {len(broken)} problem(s)")
         return 1 if broken else 0
     if command == "list":
-        for c in repo.get_configs():
+        for c in repo.iter_all_files():
             print(c)
         return 0
     if command == "git-clean-args":
