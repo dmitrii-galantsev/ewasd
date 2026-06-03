@@ -91,6 +91,12 @@ class TestBashCompletion:
         assert "--add-file" in result
         assert "compgen -f" in result
 
+    def test_rm_file_completes_from_ewasd_list(self):
+        result = generate_bash_completion()
+        # --rm-file only removes managed files, so candidates come from `ewasd list`.
+        assert "--rm-file" in result
+        assert 'compgen -W "$(ewasd list 2>/dev/null)"' in result
+
 
 class TestFishCompletion:
     """Validate fish completion script."""
@@ -152,6 +158,11 @@ class TestFishCompletion:
     def test_install_option_for_completion(self):
         result = generate_fish_completion()
         assert "install" in result
+
+    def test_rm_file_completes_from_ewasd_list(self):
+        result = generate_fish_completion()
+        assert "-l rm-file" in result
+        assert "(ewasd list 2>/dev/null)" in result
 
 
 class TestZshCompletion:
@@ -216,3 +227,8 @@ class TestZshCompletion:
         result = generate_zsh_completion()
         assert "_ewasd_commands()" in result
         assert "_describe" in result
+
+    def test_rm_file_completes_from_ewasd_list(self):
+        result = generate_zsh_completion()
+        assert "--rm-file" in result
+        assert "$(ewasd list 2>/dev/null)" in result

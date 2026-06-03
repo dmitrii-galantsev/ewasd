@@ -43,21 +43,25 @@ _ewasd_completion() {{
     opts="{opts}"
     subcommands="{subs}"
 
-    # --add-file/--rm-file take nargs="+", so keep completing files for every
-    # position after the flag until another --flag appears.
-    local i in_file_flag=0
+    # --add-file/--rm-file take nargs="+", so keep completing for every position
+    # after the flag until another --flag appears. --add-file completes any file;
+    # --rm-file completes only ewasd-managed files (as reported by 'ewasd list').
+    local i file_flag=""
     for ((i=COMP_CWORD-1; i>=1; i--)); do
         local w="${{COMP_WORDS[i]}}"
         if [[ "$w" == "--add-file" || "$w" == "--rm-file" ]]; then
-            in_file_flag=1
+            file_flag="$w"
             break
         fi
         if [[ "$w" == --* ]]; then
             break
         fi
     done
-    if [[ $in_file_flag -eq 1 ]]; then
+    if [[ "$file_flag" == "--add-file" ]]; then
         COMPREPLY=( $(compgen -f -- "${{cur}}") )
+        return 0
+    elif [[ "$file_flag" == "--rm-file" ]]; then
+        COMPREPLY=( $(compgen -W "$(ewasd list 2>/dev/null)" -- "${{cur}}") )
         return 0
     fi
 
@@ -66,8 +70,12 @@ _ewasd_completion() {{
             COMPREPLY=( $(compgen -W "{shells}" -- "${{cur}}") )
             return 0
             ;;
-        --add-file|--rm-file)
+        --add-file)
             COMPREPLY=( $(compgen -f -- "${{cur}}") )
+            return 0
+            ;;
+        --rm-file)
+            COMPREPLY=( $(compgen -W "$(ewasd list 2>/dev/null)" -- "${{cur}}") )
             return 0
             ;;
         --workspace|--old-workspace|--scan-dir)
@@ -151,11 +159,13 @@ def generate_fish_completion() -> str:
             "complete -c ewasd -l workspace -d 'Path to ewasd workspace directory' -r -a '(__fish_complete_directories)'",
             "complete -c ewasd -l project -d 'Explicitly specify the project name'",
             "complete -c ewasd -l add-file -d 'Move file(s) to central repo and create symlink' -r -F",
-            "complete -c ewasd -l rm-file -d 'Remove file(s): delete symlink and trash central copy' -r -F",
+            # --rm-file only removes ewasd-managed files, so complete from 'ewasd list'",
+            # (-x = require arg + no file completion).",
+            "complete -c ewasd -l rm-file -d 'Remove file(s): delete symlink and trash central copy' -x -a '(ewasd list 2>/dev/null)'",
             # --add-file/--rm-file accept multiple files (argparse nargs='+'); keep completing",
-            # files for all subsequent positions once the flag has been seen on the command line.",
+            # for all subsequent positions once the flag has been seen on the command line.",
             "complete -c ewasd -n '__fish_seen_argument -l add-file' -F",
-            "complete -c ewasd -n '__fish_seen_argument -l rm-file' -F",
+            "complete -c ewasd -n '__fish_seen_argument -l rm-file' -f -a '(ewasd list 2>/dev/null)'",
             "",
         ]
     )
@@ -237,7 +247,7 @@ _ewasd() {{
         '--workspace[Path to ewasd workspace directory]:workspace dir:_directories' \\
         '--project[Explicitly specify the project name]:project name:' \\
         '*--add-file[Move file(s) to central repo and create symlink]:file:_files' \\
-        '*--rm-file[Remove file(s): delete symlink and trash central copy]:file:_files' \\
+        '*--rm-file[Remove file(s): delete symlink and trash central copy]:managed file:($(ewasd list 2>/dev/null))' \\
         '1: :_ewasd_commands' \\
         '*::arg:->args' && return 0
 
