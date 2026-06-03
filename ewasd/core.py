@@ -131,9 +131,14 @@ def _consolidate_monorepo_gitignores(git_root: Path) -> Path:
     """Collect all .ewasd_gitignore files under git_root into one consolidated file."""
     entries: set[str] = {GITIGNORE_FILENAME}
     try:
-        for gi_path in git_root.rglob(GITIGNORE_FILENAME):
+        # os.walk with in-place pruning so we never descend into VCS dirs (e.g. a
+        # large .git object store) while searching for .ewasd_gitignore files.
+        for root, dirnames, filenames in os.walk(git_root):
+            dirnames[:] = [d for d in dirnames if d not in IGNORED_VCS_DIRS]
+            if GITIGNORE_FILENAME not in filenames:
+                continue
             try:
-                for line in gi_path.read_text().splitlines():
+                for line in (Path(root) / GITIGNORE_FILENAME).read_text().splitlines():
                     line = line.strip()
                     if line and not line.startswith("#"):
                         entries.add(line)
@@ -660,14 +665,34 @@ def _resolve_repo_name(cwd: Path, cfg: "ConfigParser", project_override: str | N
 
 
 def _scan_linked_items(cwd: Path, link_dir: Path) -> set[str]:
-    """Return relative POSIX paths of symlinks under cwd pointing into link_dir."""
-    found: set[str] = set()
+    """Return relative POSIX paths in cwd that are symlinks pointing into link_dir.
+
+    Rather than walking the entire (potentially huge) working tree under cwd, we
+    enumerate candidate paths from link_dir -- the only locations where ewasd ever
+    creates symlinks -- and test each against cwd. This keeps the cost proportional
+    to the size of the small curated config repo instead of the user's repo (which
+    may contain a massive .git and large source/build trees).
+    """
+    if not link_dir.exists():
+        return set()
     link_dir_resolved = link_dir.resolve()
-    for item in cwd.rglob("*"):
-        if not item.is_symlink():
+
+    # Candidate relative paths: every directory and file under link_dir. We need
+    # directories too, because a whole config directory may be symlinked as one
+    # entry (in which case its child files are not individually symlinked in cwd).
+    candidates: list[str] = []
+    for root, dirnames, filenames in os.walk(link_dir):
+        dirnames[:] = [d for d in dirnames if d not in IGNORED_VCS_DIRS]
+        root_rel = Path(root).relative_to(link_dir)
+        for name in list(dirnames) + filenames:
+            candidates.append((root_rel / name).as_posix())
+
+    found: set[str] = set()
+    for rel in candidates:
+        if rel == GITIGNORE_FILENAME:
             continue
-        rel_parts = item.relative_to(cwd).parts
-        if any(p in IGNORED_VCS_DIRS for p in rel_parts):
+        item = cwd / rel
+        if not item.is_symlink():
             continue
         try:
             tgt = Path(os.readlink(item))
@@ -678,9 +703,7 @@ def _scan_linked_items(cwd: Path, link_dir: Path) -> set[str]:
             tgt.relative_to(link_dir_resolved)
         except ValueError:
             continue
-        rel = item.relative_to(cwd).as_posix()
-        if rel != GITIGNORE_FILENAME:
-            found.add(rel)
+        found.add(rel)
     return found
 
 
