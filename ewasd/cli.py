@@ -19,6 +19,7 @@ from .core import (
     get_workspace_dir,
     init_workspace,
     migrate_symlinks,
+    rm_file_from_repo,
     warn,
 )
 
@@ -162,6 +163,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         nargs="+",
         help="Move specified file(s) to central repo and create symlink back (auto-creates project entry if needed)",
     )
+    parser.add_argument(
+        "--rm-file",
+        type=str,
+        nargs="+",
+        help="Remove previously added file(s): delete the local symlink and trash the central repo copy (recoverable)",
+    )
     sub = parser.add_subparsers(dest="command", required=False)
 
     link_p = sub.add_parser("link", help="Link all discovered config entries (default action)")
@@ -286,9 +293,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     cwd = Path.cwd()
 
-    # Handle --add-file first (before repo resolution)
+    # Handle --add-file / --rm-file first (before repo resolution)
     if getattr(ns, "add_file", None):
         return add_file_to_repo(ns.add_file, cwd, cfg, getattr(ns, "project", None))
+    if getattr(ns, "rm_file", None):
+        return rm_file_from_repo(ns.rm_file, cwd, cfg, getattr(ns, "project", None))
 
     trace: list[str] = []
     repo_name = detect_repo_name(

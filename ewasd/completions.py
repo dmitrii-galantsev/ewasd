@@ -2,7 +2,7 @@
 
 # Completion data - used to generate shell-specific completions
 COMPLETIONS = {
-    "main_options": ["--workspace", "--project", "--add-file"],
+    "main_options": ["--workspace", "--project", "--add-file", "--rm-file"],
     "subcommands": {
         "link": "Link all discovered config entries (default action)",
         "list": "List config entries for the detected repo",
@@ -43,20 +43,20 @@ _ewasd_completion() {{
     opts="{opts}"
     subcommands="{subs}"
 
-    # --add-file takes nargs="+", so keep completing files for every position
-    # after --add-file until another --flag appears.
-    local i in_add_file=0
+    # --add-file/--rm-file take nargs="+", so keep completing files for every
+    # position after the flag until another --flag appears.
+    local i in_file_flag=0
     for ((i=COMP_CWORD-1; i>=1; i--)); do
         local w="${{COMP_WORDS[i]}}"
-        if [[ "$w" == "--add-file" ]]; then
-            in_add_file=1
+        if [[ "$w" == "--add-file" || "$w" == "--rm-file" ]]; then
+            in_file_flag=1
             break
         fi
         if [[ "$w" == --* ]]; then
             break
         fi
     done
-    if [[ $in_add_file -eq 1 ]]; then
+    if [[ $in_file_flag -eq 1 ]]; then
         COMPREPLY=( $(compgen -f -- "${{cur}}") )
         return 0
     fi
@@ -66,7 +66,7 @@ _ewasd_completion() {{
             COMPREPLY=( $(compgen -W "{shells}" -- "${{cur}}") )
             return 0
             ;;
-        --add-file)
+        --add-file|--rm-file)
             COMPREPLY=( $(compgen -f -- "${{cur}}") )
             return 0
             ;;
@@ -151,9 +151,11 @@ def generate_fish_completion() -> str:
             "complete -c ewasd -l workspace -d 'Path to ewasd workspace directory' -r -a '(__fish_complete_directories)'",
             "complete -c ewasd -l project -d 'Explicitly specify the project name'",
             "complete -c ewasd -l add-file -d 'Move file(s) to central repo and create symlink' -r -F",
-            # --add-file accepts multiple files (argparse nargs='+'); keep completing files",
-            # for all subsequent positions once --add-file has been seen on the command line.",
+            "complete -c ewasd -l rm-file -d 'Remove file(s): delete symlink and trash central copy' -r -F",
+            # --add-file/--rm-file accept multiple files (argparse nargs='+'); keep completing",
+            # files for all subsequent positions once the flag has been seen on the command line.",
             "complete -c ewasd -n '__fish_seen_argument -l add-file' -F",
+            "complete -c ewasd -n '__fish_seen_argument -l rm-file' -F",
             "",
         ]
     )
@@ -161,7 +163,10 @@ def generate_fish_completion() -> str:
     # Subcommands. Suppress when --add-file is on the line: --add-file is mutually
     # exclusive with subcommands, and the -f on these rules would otherwise stop
     # file completion at 'ewasd --add-file <TAB>'.
-    sub_cond = "__fish_use_subcommand; and not __fish_seen_argument -l add-file"
+    sub_cond = (
+        "__fish_use_subcommand; and not __fish_seen_argument -l add-file; "
+        "and not __fish_seen_argument -l rm-file"
+    )
     for cmd, desc in COMPLETIONS["subcommands"].items():
         lines.append(f"complete -c ewasd -f -n '{sub_cond}' -a '{cmd}' -d '{desc}'")
     lines.append("")
@@ -232,6 +237,7 @@ _ewasd() {{
         '--workspace[Path to ewasd workspace directory]:workspace dir:_directories' \\
         '--project[Explicitly specify the project name]:project name:' \\
         '*--add-file[Move file(s) to central repo and create symlink]:file:_files' \\
+        '*--rm-file[Remove file(s): delete symlink and trash central copy]:file:_files' \\
         '1: :_ewasd_commands' \\
         '*::arg:->args' && return 0
 

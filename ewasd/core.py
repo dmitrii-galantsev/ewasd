@@ -258,13 +258,18 @@ class Repo:
         _do_link(src, dst, dry_run)
         return [target_name]
 
-    def update_gitignore(self, cwd: Path, linked_items: list[str]) -> None:
+    def update_gitignore(
+        self, cwd: Path, linked_items: list[str], *, allow_empty: bool = False
+    ) -> None:
         """Create/update .ewasd_gitignore with only actually symlinked items.
 
         For monorepos: consolidates all .ewasd_gitignore files into a single
         file at the git root so that all projects' symlinks are properly ignored.
+
+        With allow_empty=True the file is rewritten even when no items remain
+        (used by --rm-file to drop the last tracked entry).
         """
-        if not linked_items:
+        if not linked_items and not allow_empty:
             return
 
         resolved_cwd = cwd.resolve()
@@ -636,6 +641,63 @@ def migrate_symlinks(ws: Path, old_ws: Path, target_dir: Path, dry_run: bool) ->
     return fixed, broken
 
 
+def _resolve_repo_name(cwd: Path, cfg: "ConfigParser", project_override: str | None) -> str | None:
+    """Determine the repo name for file operations (--add-file / --rm-file)."""
+    if project_override:
+        return project_override
+    repo_name = detect_repo_name(
+        project_override=None, remotes=collect_remotes(), cwd=cwd, known_repo_names=cfg.repo_names()
+    )
+    if not repo_name:
+        remotes = collect_remotes()
+        if remotes:
+            repo_name = find_repo_name(remotes)
+        if not repo_name:
+            path_parts = [p for p in cwd.parts if p and p != "/"]
+            if path_parts:
+                repo_name = path_parts[-1]
+    return repo_name
+
+
+def _scan_linked_items(cwd: Path, link_dir: Path) -> set[str]:
+    """Return relative POSIX paths of symlinks under cwd pointing into link_dir."""
+    found: set[str] = set()
+    link_dir_resolved = link_dir.resolve()
+    for item in cwd.rglob("*"):
+        if not item.is_symlink():
+            continue
+        rel_parts = item.relative_to(cwd).parts
+        if any(p in IGNORED_VCS_DIRS for p in rel_parts):
+            continue
+        try:
+            tgt = Path(os.readlink(item))
+            tgt = (item.parent / tgt).resolve() if not tgt.is_absolute() else tgt.resolve()
+        except OSError:
+            continue
+        try:
+            tgt.relative_to(link_dir_resolved)
+        except ValueError:
+            continue
+        rel = item.relative_to(cwd).as_posix()
+        if rel != GITIGNORE_FILENAME:
+            found.add(rel)
+    return found
+
+
+def _trash_path(path: Path) -> bool:
+    """Send a path to the system trash using the 'trash' CLI. Returns True on success."""
+    trash_cmd = shutil.which("trash") or shutil.which("trash-put")
+    if not trash_cmd:
+        warn("'trash' command not found; install trash-cli (e.g. 'pip install trash-cli')")
+        return False
+    try:
+        subprocess.run([trash_cmd, str(path)], check=True, capture_output=True)
+        return True
+    except (OSError, subprocess.CalledProcessError) as e:
+        warn(f"Failed to trash {path}: {e}")
+        return False
+
+
 def add_file_to_repo(
     filenames: list[str], cwd: Path, cfg: "ConfigParser", project_override: str | None
 ) -> int:
@@ -648,23 +710,7 @@ def add_file_to_repo(
         return 1
 
     # Determine repo name
-    if project_override:
-        repo_name = project_override
-    else:
-        repo_name = detect_repo_name(
-            project_override=None,
-            remotes=collect_remotes(),
-            cwd=cwd,
-            known_repo_names=cfg.repo_names(),
-        )
-        if not repo_name:
-            remotes = collect_remotes()
-            if remotes:
-                repo_name = find_repo_name(remotes)
-            if not repo_name:
-                path_parts = [p for p in cwd.parts if p and p != "/"]
-                if path_parts:
-                    repo_name = path_parts[-1]
+    repo_name = _resolve_repo_name(cwd, cfg, project_override)
 
     if not repo_name:
         warn("Unable to determine repository name for --add-file operation")
@@ -716,26 +762,89 @@ def add_file_to_repo(
 
     tracked = successfully_added + already_linked
     if tracked:
-        all_linked: set[str] = set(tracked)
-        link_dir_resolved = repo.link_dir.resolve()
-        for item in cwd.rglob("*"):
-            if not item.is_symlink():
-                continue
-            rel_parts = item.relative_to(cwd).parts
-            if any(p in IGNORED_VCS_DIRS for p in rel_parts):
-                continue
-            try:
-                tgt = Path(os.readlink(item))
-                tgt = (item.parent / tgt).resolve() if not tgt.is_absolute() else tgt.resolve()
-            except OSError:
-                continue
-            try:
-                tgt.relative_to(link_dir_resolved)
-            except ValueError:
-                continue
-            rel = item.relative_to(cwd).as_posix()
-            if rel != GITIGNORE_FILENAME:
-                all_linked.add(rel)
+        all_linked = set(tracked) | _scan_linked_items(cwd, repo.link_dir)
         repo.update_gitignore(cwd, sorted(all_linked))
 
     return 0
+
+
+def rm_file_from_repo(
+    filenames: list[str], cwd: Path, cfg: "ConfigParser", project_override: str | None
+) -> int:
+    """Remove previously added file(s): delete the local symlink and trash the
+    central repo copy (recoverable). Inverse of add_file_to_repo. Returns exit code.
+    """
+    repo_name = _resolve_repo_name(cwd, cfg, project_override)
+    if not repo_name:
+        warn("Unable to determine repository name for --rm-file operation")
+        warn("Please use --project <name> to specify explicitly")
+        return 1
+
+    try:
+        repo = cfg.get_repo(repo_name)
+    except KeyError:
+        warn(f"Project '{repo_name}' not found in config")
+        return 1
+    except ValueError as exc:
+        warn(str(exc))
+        return 1
+
+    exit_code = 0
+    removed_any = False
+    for filename in filenames:
+        file_path = cwd / filename
+        target_path = repo.link_dir / filename
+
+        # Verify the local file is a symlink pointing at the central repo copy.
+        is_managed_link = False
+        if file_path.is_symlink():
+            try:
+                link_target = Path(os.readlink(file_path))
+                link_target = (
+                    (file_path.parent / link_target).resolve()
+                    if not link_target.is_absolute()
+                    else link_target.resolve()
+                )
+                if link_target == target_path.resolve():
+                    is_managed_link = True
+            except OSError:
+                pass
+
+        if not is_managed_link:
+            if not file_path.is_symlink() and not file_path.exists():
+                warn(f"{filename} does not exist in current directory; skipping")
+            else:
+                warn(
+                    f"{filename} is not an ewasd-managed symlink "
+                    f"(expected link to {target_path}); skipping"
+                )
+            exit_code = 1
+            continue
+
+        # Remove the local symlink.
+        try:
+            file_path.unlink()
+            print(f"Removed symlink {file_path}")
+        except OSError as e:
+            warn(f"Failed to remove symlink {file_path}: {e}")
+            exit_code = 1
+            continue
+
+        # Trash the central repo copy so it can be recovered if needed.
+        if target_path.exists():
+            if _trash_path(target_path):
+                success(f"Moved {filename} to trash from central repo")
+                removed_any = True
+            else:
+                exit_code = 1
+        else:
+            warn(f"Central repo file {target_path} not found (symlink was broken)")
+            removed_any = True
+
+    # Rebuild the gitignore from whatever symlinks remain (allow_empty so the
+    # last removed entry is actually dropped).
+    if removed_any:
+        remaining = sorted(_scan_linked_items(cwd, repo.link_dir))
+        repo.update_gitignore(cwd, remaining, allow_empty=True)
+
+    return exit_code

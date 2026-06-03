@@ -13,7 +13,7 @@
 
       mkEwasd = pkgs: pkgs.python3Packages.buildPythonApplication {
         pname = "ewasd";
-        version = "0.7.0";
+        version = "0.8.0";
         pyproject = true;
 
         src = ./.;

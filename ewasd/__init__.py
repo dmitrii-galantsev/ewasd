@@ -17,6 +17,7 @@ from .core import (
     get_workspace_dir,
     init_workspace,
     migrate_symlinks,
+    rm_file_from_repo,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "get_workspace_dir",
     "init_workspace",
     "migrate_symlinks",
+    "rm_file_from_repo",
 ]
