@@ -49,7 +49,7 @@ def test_detect_repo_name_override(tmp_path: Path, monkeypatch):
     proj.mkdir(parents=True)
 
     # Fake git root command
-    def fake_check_output(cmd, cwd=None, text=None):
+    def fake_check_output(cmd, cwd=None, text=None, **_kwargs):
         if cmd[:2] == ["git", "rev-parse"]:
             return str(mono)
         raise RuntimeError("Unexpected command")
@@ -264,7 +264,7 @@ def test_add_file_preserves_existing_gitignore_entries(tmp_path: Path, monkeypat
     src_dir.mkdir()
     dst_dir.mkdir()
 
-    def fake_check_output(cmd, cwd=None, text=None):
+    def fake_check_output(cmd, cwd=None, text=None, **_kwargs):
         if cmd[:2] == ["git", "rev-parse"]:
             return str(dst_dir)
         raise RuntimeError(f"Unexpected command: {cmd}")
@@ -322,7 +322,7 @@ def test_update_gitignore_monorepo_paths(tmp_path: Path, monkeypatch):
     (src_dir / "config.txt").write_text("content")
 
     # Mock git root detection
-    def fake_check_output(cmd, cwd=None, text=None):
+    def fake_check_output(cmd, cwd=None, text=None, **_kwargs):
         if cmd[:2] == ["git", "rev-parse"]:
             return str(mono_root)
         if cmd[:3] == ["git", "config", "core.excludesFile"]:

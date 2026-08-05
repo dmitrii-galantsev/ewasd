@@ -13,7 +13,7 @@
 
       mkEwasd = pkgs: pkgs.python3Packages.buildPythonApplication {
         pname = "ewasd";
-        version = "0.8.0";
+        version = "0.9.0";
         pyproject = true;
 
         src = ./.;
@@ -25,7 +25,9 @@
           termcolor
         ];
 
-        nativeCheckInputs = [ pkgs.python3Packages.pytestCheckHook ];
+        # git is required: the monorepo regression tests drive real
+        # repositories, submodules and worktrees rather than mocking git.
+        nativeCheckInputs = [ pkgs.python3Packages.pytestCheckHook pkgs.git ];
 
         meta = {
           description = "Symlink curated editor/IDE config files into active repositories";
