@@ -4,12 +4,16 @@ Provides functionality to link curated editor / tooling configuration files from
 repository into individual project working directories.
 """
 
+from . import api
 from .core import (
     GITIGNORE_FILENAME,
     IGNORED_VCS_DIRS,
     ConfigParser,
+    Message,
     Repo,
     add_file_to_repo,
+    add_files,
+    capture_messages,
     collect_remotes,
     find_repo_name,
     get_config_dir,
@@ -24,8 +28,12 @@ __all__ = [
     "GITIGNORE_FILENAME",
     "IGNORED_VCS_DIRS",
     "ConfigParser",
+    "Message",
     "Repo",
     "add_file_to_repo",
+    "add_files",
+    "api",
+    "capture_messages",
     "collect_remotes",
     "find_repo_name",
     "get_config_dir",

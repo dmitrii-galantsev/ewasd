@@ -297,7 +297,7 @@ def test_add_file_preserves_existing_gitignore_entries(tmp_path: Path, monkeypat
         def get_repo(self, name):
             return repo
 
-    monkeypatch.setattr(core_mod, "collect_remotes", lambda: [])
+    monkeypatch.setattr(core_mod, "collect_remotes", lambda cwd=None: [])
     monkeypatch.setattr(core_mod, "detect_repo_name", lambda **kw: "test")
 
     core_mod.add_file_to_repo(["newfile.sh"], dst_dir, FakeCfg(), project_override=None)

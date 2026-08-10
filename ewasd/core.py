@@ -8,8 +8,10 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:  # Optional color support
@@ -87,12 +89,60 @@ def get_remote_keys() -> list[str]:
     return cfg.get("remote_keys", ["remote.origin.url"])
 
 
+@dataclass
+class Message:
+    """A user-facing message emitted by a core operation.
+
+    ``level`` is one of ``"info"``, ``"success"`` or ``"warn"``.
+    """
+
+    level: str
+    text: str
+
+
+_sink: ContextVar[list[Message] | None] = ContextVar("ewasd_message_sink", default=None)
+
+
+@contextmanager
+def capture_messages() -> Iterator[list[Message]]:
+    """Divert core's user-facing output into a list instead of the terminal.
+
+    Required for any non-TTY consumer (MCP server, library use): writing to
+    stdout would corrupt a JSON-RPC stdio transport. Nestable and
+    context-local, so concurrent async callers do not steal each other's
+    output.
+    """
+    collected: list[Message] = []
+    token = _sink.set(collected)
+    try:
+        yield collected
+    finally:
+        _sink.reset(token)
+
+
+def _emit(level: str, text: str) -> None:
+    sink = _sink.get()
+    if sink is not None:
+        sink.append(Message(level=level, text=text))
+        return
+    if level == "warn":
+        print(colored(f"WARN: {text}", "yellow"), file=sys.stderr)
+    elif level == "success":
+        print(colored(text, "green"))
+    else:
+        print(text)
+
+
 def warn(msg: str) -> None:
-    print(colored(f"WARN: {msg}", "yellow"), file=sys.stderr)
+    _emit("warn", msg)
 
 
 def success(msg: str) -> None:
-    print(colored(msg, "green"))
+    _emit("success", msg)
+
+
+def info(msg: str) -> None:
+    _emit("info", msg)
 
 
 def _detect_git_root(cwd: Path, resolved_cwd: Path) -> tuple[Path | None, str]:
@@ -256,7 +306,7 @@ def _set_git_excludes(gitignore_path: Path, cwd: Path) -> None:
 def _do_link(src: Path, dst: Path, dry_run: bool) -> None:
     """Create a symlink or print what would be done."""
     if dry_run:
-        print(f"  Would link {src} -> {dst}")
+        info(f"  Would link {src} -> {dst}")
     else:
         success(f"Linked {src} to {dst}")
         dst.symlink_to(src)
@@ -378,14 +428,16 @@ class Repo:
 
         _set_git_excludes(target_gitignore, cwd)
 
-    def link_all(self, cwd: Path, *, dry_run: bool = False) -> None:
-        linked_items = []
+    def link_all(self, cwd: Path, *, dry_run: bool = False) -> list[str]:
+        """Link every config entry. Returns the relative paths that are linked."""
+        linked_items: list[str] = []
         for cfg in self.get_configs():
             paths = self.link_any(cfg, cwd, dry_run=dry_run)
             linked_items.extend(paths)
         # Auto-update gitignore with only successfully linked items
         if not dry_run:
             self.update_gitignore(cwd, linked_items)
+        return linked_items
 
     def iter_git_clean_args(self) -> Iterable[str]:
         # Produces tokens suitable for: git clean -fdx $(ewasd git-clean-args)
@@ -487,7 +539,7 @@ class ConfigParser:
         """Auto-create a new repo entry by inferring from current context."""
         # Try to get git remote for URL
         try:
-            remotes = collect_remotes()
+            remotes = collect_remotes(cwd)
             git_url = remotes[0] if remotes else f"https://example.com/{name}.git"
         except (OSError, subprocess.CalledProcessError):  # pragma: no cover
             git_url = f"https://example.com/{name}.git"
@@ -533,12 +585,22 @@ class ConfigParser:
             return None
 
 
-def collect_remotes() -> list[str]:
+def collect_remotes(cwd: Path | None = None) -> list[str]:
+    """Read configured git remote URLs.
+
+    *cwd* selects the repository to inspect. It defaults to the process working
+    directory for CLI use, but any caller that is not the CLI (library, MCP
+    server) must pass it explicitly -- the process cwd is meaningless there.
+    """
     out: list[str] = []
     for key in get_remote_keys():
         try:
             result = subprocess.run(
-                ["git", "config", "--get", key], capture_output=True, text=True, check=False
+                ["git", "config", "--get", key],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=str(cwd) if cwd else None,
             )
             url = result.stdout.strip()
             if url:
@@ -677,8 +739,8 @@ def init_workspace(ws: Path, from_git: str | None) -> int:
 
     legacy = find_legacy_workspace()
     if legacy and legacy.resolve() != ws.resolve() and not (ws / "editors.toml").exists():
-        print(f"Found existing workspace at {legacy}")
-        print(f"Copying to {ws} ...")
+        info(f"Found existing workspace at {legacy}")
+        info(f"Copying to {ws} ...")
         ws.mkdir(parents=True, exist_ok=True)
         shutil.copy2(legacy / "editors.toml", ws / "editors.toml")
         legacy_repos = legacy / "repos"
@@ -688,7 +750,7 @@ def init_workspace(ws: Path, from_git: str | None) -> int:
                 shutil.rmtree(dest_repos)
             shutil.copytree(legacy_repos, dest_repos, symlinks=True)
         success(f"Migrated workspace from {legacy} to {ws}")
-        print("Run 'ewasd migrate --old-workspace " + str(legacy) + "' to fix existing symlinks.")
+        info("Run 'ewasd migrate --old-workspace " + str(legacy) + "' to fix existing symlinks.")
         return 0
 
     ws.mkdir(parents=True, exist_ok=True)
@@ -722,7 +784,7 @@ def migrate_symlinks(ws: Path, old_ws: Path, target_dir: Path, dry_run: bool) ->
         new_target = link_target.replace(old_ws_str, new_ws_str, 1)
         if Path(new_target).exists():
             if dry_run:
-                print(f"  Would fix: {item} -> {new_target}")
+                info(f"  Would fix: {item} -> {new_target}")
             else:
                 item.unlink()
                 item.symlink_to(new_target)
@@ -740,10 +802,13 @@ def _resolve_repo_name(cwd: Path, cfg: "ConfigParser", project_override: str | N
     if project_override:
         return project_override
     repo_name = detect_repo_name(
-        project_override=None, remotes=collect_remotes(), cwd=cwd, known_repo_names=cfg.repo_names()
+        project_override=None,
+        remotes=collect_remotes(cwd),
+        cwd=cwd,
+        known_repo_names=cfg.repo_names(),
     )
     if not repo_name:
-        remotes = collect_remotes()
+        remotes = collect_remotes(cwd)
         if remotes:
             repo_name = find_repo_name(remotes)
         if not repo_name:
@@ -810,16 +875,42 @@ def _trash_path(path: Path) -> bool:
         return False
 
 
+@dataclass
+class AddFileOutcome:
+    """Structured result of an add-file operation."""
+
+    exit_code: int
+    repo_name: str | None = None
+    link_dir: Path | None = None
+    added: list[str] = field(default_factory=list)
+    skipped: list[dict[str, str]] = field(default_factory=list)
+    created_repo_entry: bool = False
+
+
 def add_file_to_repo(
     filenames: list[str], cwd: Path, cfg: "ConfigParser", project_override: str | None
 ) -> int:
     """Move file(s) to central repo and create symlink back. Returns exit code."""
+    return add_files(filenames, cwd, cfg, project_override).exit_code
+
+
+def add_files(
+    filenames: list[str], cwd: Path, cfg: "ConfigParser", project_override: str | None
+) -> AddFileOutcome:
+    """Move file(s) to central repo and create symlink back.
+
+    Same behaviour as :func:`add_file_to_repo` but returns a structured
+    :class:`AddFileOutcome` describing exactly what happened, so non-CLI
+    callers do not have to scrape printed output.
+    """
     # Validate all files exist first
     missing_files = [f for f in filenames if not (cwd / f).exists()]
     if missing_files:
         for filename in missing_files:
             warn(f"File {filename} does not exist in current directory")
-        return 1
+        return AddFileOutcome(
+            exit_code=1, skipped=[{"file": f, "reason": "missing_locally"} for f in missing_files]
+        )
 
     # Determine repo name
     repo_name = _resolve_repo_name(cwd, cfg, project_override)
@@ -827,26 +918,30 @@ def add_file_to_repo(
     if not repo_name:
         warn("Unable to determine repository name for --add-file operation")
         warn("Please use --project <name> to specify explicitly")
-        return 1
+        return AddFileOutcome(exit_code=1)
 
+    created_entry = False
     # Ensure project exists in config
     try:
         repo = cfg.get_repo(repo_name)
     except KeyError:
-        print(f"Project '{repo_name}' not found in config. Creating...")
-        repo = cfg.create_repo_entry(repo_name, cwd)
-        if not repo:
+        info(f"Project '{repo_name}' not found in config. Creating...")
+        maybe_repo = cfg.create_repo_entry(repo_name, cwd)
+        if not maybe_repo:
             warn(f"Failed to create project entry for '{repo_name}'")
-            return 1
+            return AddFileOutcome(exit_code=1, repo_name=repo_name)
+        repo = maybe_repo
+        created_entry = True
         success(f"Created project entry: {repo_name} -> {repo.link_dir}")
     except ValueError as exc:
         warn(str(exc))
-        return 1
+        return AddFileOutcome(exit_code=1, repo_name=repo_name)
 
     repo.link_dir.mkdir(parents=True, exist_ok=True)
 
     successfully_added: list[str] = []
     already_linked: list[str] = []
+    skipped: list[dict[str, str]] = []
     for filename in filenames:
         file_path = cwd / filename
         target_path = repo.link_dir / filename
@@ -854,8 +949,15 @@ def add_file_to_repo(
             if file_path.is_symlink():
                 try:
                     if Path(os.readlink(file_path)).resolve() == target_path.resolve():
-                        print(f"Already linked: {filename}")
+                        info(f"Already linked: {filename}")
                         already_linked.append(filename)
+                        skipped.append(
+                            {
+                                "file": filename,
+                                "reason": "already_linked",
+                                "workspace_path": str(target_path),
+                            }
+                        )
                         continue
                 except OSError:
                     pass
@@ -863,11 +965,18 @@ def add_file_to_repo(
                 f"File {filename} already exists in central repo at {target_path}; "
                 f"local {file_path} is not a symlink to it. Skipping."
             )
+            skipped.append(
+                {
+                    "file": filename,
+                    "reason": "exists_in_workspace",
+                    "workspace_path": str(target_path),
+                }
+            )
             continue
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Moving {file_path} -> {target_path}")
+        info(f"Moving {file_path} -> {target_path}")
         shutil.move(str(file_path), str(target_path))
-        print(f"Creating symlink {file_path} -> {target_path}")
+        info(f"Creating symlink {file_path} -> {target_path}")
         file_path.symlink_to(target_path)
         successfully_added.append(filename)
         success(f"Successfully added {filename} to central repo and created symlink")
@@ -877,7 +986,14 @@ def add_file_to_repo(
         all_linked = set(tracked) | _scan_linked_items(cwd, repo.link_dir)
         repo.update_gitignore(cwd, sorted(all_linked))
 
-    return 0
+    return AddFileOutcome(
+        exit_code=0,
+        repo_name=repo_name,
+        link_dir=repo.link_dir,
+        added=successfully_added,
+        skipped=skipped,
+        created_repo_entry=created_entry,
+    )
 
 
 def rm_file_from_repo(
@@ -936,7 +1052,7 @@ def rm_file_from_repo(
         # Remove the local symlink.
         try:
             file_path.unlink()
-            print(f"Removed symlink {file_path}")
+            info(f"Removed symlink {file_path}")
         except OSError as e:
             warn(f"Failed to remove symlink {file_path}: {e}")
             exit_code = 1

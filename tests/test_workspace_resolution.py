@@ -202,7 +202,7 @@ class TestConfigParserWorkspace:
         (ws / "repos").mkdir()
 
         monkeypatch.setattr(
-            "ewasd.core.collect_remotes", lambda: ["https://github.com/user/newrepo.git"]
+            "ewasd.core.collect_remotes", lambda cwd=None: ["https://github.com/user/newrepo.git"]
         )
 
         cfg = ConfigParser(workspace_dir=ws)

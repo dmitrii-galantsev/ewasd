@@ -85,6 +85,89 @@ Place config files in the `link_dir` -they'll be symlinked when working in that 
 # remote_keys = ["remote.origin.url", "remote.upstream.url"]
 ```
 
+## MCP Server (AI agents)
+
+ewasd ships an [MCP](https://modelcontextprotocol.io) server so agents can inspect and
+manage links without shelling out and parsing text.
+
+```bash
+pip install 'ewasd[mcp]'   # adds the `ewasd-mcp` stdio server
+```
+
+Register it with your client.
+
+**Codex** (`~/.codex/config.toml`) / **Claude Desktop**:
+
+```toml
+[mcp_servers.ewasd]
+command = "ewasd-mcp"
+# Optional: pin the workspace instead of relying on XDG resolution
+[mcp_servers.ewasd.env]
+EWASD_WORKSPACE = "/home/you/.local/share/ewasd"
+```
+
+**opencode** (`opencode.json`):
+
+```json
+{
+  "mcp": {
+    "ewasd": {
+      "type": "local",
+      "command": ["ewasd-mcp"],
+      "enabled": true,
+      "environment": { "EWASD_WORKSPACE": "/home/you/.local/share/ewasd" }
+    }
+  }
+}
+```
+
+Verify with `opencode mcp list` or `codex mcp list`.
+
+### Tools
+
+| Tool | Kind | Purpose |
+|------|------|---------|
+| `status` | read | One-call orientation: config, detected repo, entries, link health |
+| `describe_config` | read | Resolved workspace / editors.toml / known repo names |
+| `detect` | read | Which repo matches a directory, and **why** (`matched_by` + `trace`) |
+| `list_configs` | read | Managed entries with their current linked state |
+| `doctor` | read | Broken, mis-pointed and orphaned symlinks |
+| `git_clean_args` | read | Builds a safe `git clean` command — never runs it |
+| `link` | write | Create symlinks; **defaults to `dry_run=true`** |
+| `add_files` | write | Move file(s) into the workspace and symlink back |
+| `init` | write | Create or clone a workspace |
+
+Every tool takes an explicit `cwd` and reports failures as data (`ok: false` plus an
+`error` code and actionable `hints`) rather than raising.
+
+### Protocol
+
+Built on the official Python SDK and compatible with both the 1.x (`FastMCP`) and 2.x
+(`MCPServer`) releases; the protocol revision is negotiated by the SDK.
+
+Tools use **structured output** — each publishes an `outputSchema` and returns
+`structuredContent`, with a JSON text block alongside it for clients that predate the
+feature. So a client knows the shape of a reply, including the error envelope, before
+it ever makes a call.
+
+`clean` is intentionally not exposed: `git clean` deletes untracked files and is not
+something an agent should be able to trigger. Use `git_clean_args` and run it yourself.
+
+`add_files` *moves* files. It is advertised as non-destructive by default so that
+clients configured to auto-deny destructive tools can still use it. Set
+`EWASD_MCP_STRICT=1` to mark it destructive and force those clients to ask a human.
+
+### Library use
+
+The same operations are available as a plain Python API that never prints:
+
+```python
+from ewasd import api
+
+res = api.status(cwd="/path/to/repo")
+print(res.summary, res.detection.matched_by)
+```
+
 ## Shell Completions
 
 ```bash

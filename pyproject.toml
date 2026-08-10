@@ -20,11 +20,13 @@ classifiers = [
 packages = ["ewasd"]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "mypy", "termcolor", "tomlkit"]
+dev = ["pytest", "ruff", "mypy", "termcolor", "tomlkit", "mcp>=1.2.0"]
 color = ["termcolor>=2.4.0"]
+mcp = ["mcp>=1.2.0"]
 
 [project.scripts]
 ewasd = "ewasd.cli:main"
+ewasd-mcp = "ewasd.mcp_server:main"
 
 [tool.ruff]
 line-length = 100
