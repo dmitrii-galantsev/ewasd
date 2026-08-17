@@ -37,6 +37,10 @@ func TestLoadConsoleTokenRejectsWeakOverride(t *testing.T) {
 
 func TestMigrateLegacyCommandImportsAndRetiresPythonMarker(t *testing.T) {
 	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	legacy := filepath.Join(root, "legacy")
 	legacySource := filepath.Join(legacy, "repos", "demo")
 	repository := filepath.Join(root, "repository")

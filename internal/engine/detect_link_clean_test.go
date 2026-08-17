@@ -180,7 +180,7 @@ func TestLinkReturnsErrorWhenPostCommitGitProtectionFails(t *testing.T) {
 
 func TestDetectMonorepoScopeByRemoteAndPathFallback(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := canonicalTestRoot(t)
 	stateStore, err := store.New(filepath.Join(root, "state"))
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +230,7 @@ func TestDetectMonorepoScopeByRemoteAndPathFallback(t *testing.T) {
 
 func TestDetectAmbiguousRemoteRequiresExplicitProject(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := canonicalTestRoot(t)
 	stateStore, _ := store.New(filepath.Join(root, "state"))
 	e := New(stateStore)
 	for _, name := range []string{"one", "two"} {
@@ -262,7 +262,7 @@ func TestDetectAmbiguousRemoteRequiresExplicitProject(t *testing.T) {
 
 func TestCleanExplicitProjectCannotRetargetAnotherRegisteredRoot(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := canonicalTestRoot(t)
 	stateStore, _ := store.New(filepath.Join(root, "state"))
 	e := New(stateStore)
 	mono := filepath.Join(root, "mono")
@@ -398,7 +398,7 @@ func TestCleanAllProtectsManagedLinksAndSkipsNestedRepositories(t *testing.T) {
 
 func TestCleanModesAndScope(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := canonicalTestRoot(t)
 	stateStore, _ := store.New(filepath.Join(root, "state"))
 	e := New(stateStore)
 	mono := filepath.Join(root, "mono")
@@ -611,4 +611,13 @@ func containsString(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func canonicalTestRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }

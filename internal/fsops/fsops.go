@@ -112,7 +112,15 @@ func LinkPointsTo(link, expected string) bool {
 		return false
 	}
 	want, err := filepath.Abs(filepath.Clean(expected))
-	return err == nil && actual == want
+	if err != nil {
+		return false
+	}
+	if actual == want {
+		return true
+	}
+	actualResolved, actualErr := filepath.EvalSymlinks(actual)
+	wantResolved, wantErr := filepath.EvalSymlinks(want)
+	return actualErr == nil && wantErr == nil && actualResolved == wantResolved
 }
 
 func CopyTree(source, destination string) error {

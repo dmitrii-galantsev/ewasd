@@ -15,6 +15,10 @@ import (
 func TestDiscoverUsesExactLegacySymlinksAndReportsStaleEntries(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	workspace := filepath.Join(root, "legacy")
 	source := filepath.Join(workspace, "repos", "demo")
 	repository := filepath.Join(root, "repository")

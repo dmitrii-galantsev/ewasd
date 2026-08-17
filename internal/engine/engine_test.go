@@ -25,6 +25,10 @@ type fixture struct {
 func newFixture(t *testing.T) fixture {
 	t.Helper()
 	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	repo := filepath.Join(root, "checkout")
 	if err := os.Mkdir(repo, 0o755); err != nil {
 		t.Fatal(err)
