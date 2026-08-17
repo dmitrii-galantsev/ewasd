@@ -1,0 +1,13 @@
+{
+  "name": "ewasd-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:browser": "playwright test",
+    "test:browser:headed": "playwright test --headed",
+    "test:browser:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.62.1"
+  }
+}

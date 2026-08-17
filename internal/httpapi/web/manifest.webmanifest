@@ -1,0 +1,12 @@
+{
+  "name": "ewasd",
+  "short_name": "ewasd",
+  "description": "Local operations console for explicit repository overlays",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f6f2",
+  "theme_color": "#12221f",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

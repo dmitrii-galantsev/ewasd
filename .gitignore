@@ -20,6 +20,12 @@ htmlcov/
 .venv/
 venv/
 
+# Go / browser verification
+node_modules/
+playwright-report/
+test-results/
+browser-artifacts/
+
 # IDEs and editors
 .vscode/
 .idea/
