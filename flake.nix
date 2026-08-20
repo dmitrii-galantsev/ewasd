@@ -1,55 +1,62 @@
 {
-  description = "ewasd — explicit, journaled repository overlays";
+  description = "ewasd - Symlink curated editor/IDE config files into active repositories";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  };
 
   outputs = { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-      forAllSystems = f: nixpkgs.lib.genAttrs systems (system:
-        f system (import nixpkgs { inherit system; })
-      );
-    in {
-      packages = forAllSystems (_system: pkgs: {
-        ewasd = pkgs.buildGoModule {
-          pname = "ewasd";
-          version = "2.0.0";
-          src = ./.;
-          vendorHash = null;
-          subPackages = [ "cmd/ewasd" ];
-          ldflags = [ "-s" "-w" ];
-          nativeBuildInputs = [ pkgs.git ];
-          doCheck = true;
-          checkPhase = ''
-            runHook preCheck
-            go test ./...
-            runHook postCheck
-          '';
-          meta = {
-            description = "Explicit, journaled repository overlay manager";
-            homepage = "https://github.com/dmitrii-galantsev/ewasd";
-            license = pkgs.lib.licenses.mit;
-            mainProgram = "ewasd";
+      supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+      pkgsFor = system: nixpkgs.legacyPackages.${system};
+
+      mkEwasd = pkgs: pkgs.python3Packages.buildPythonApplication {
+        pname = "ewasd";
+        version = "0.9.0";
+        pyproject = true;
+
+        src = ./.;
+
+        build-system = [ pkgs.python3Packages.setuptools ];
+
+        dependencies = with pkgs.python3Packages; [
+          tomlkit
+          termcolor
+        ];
+
+        # git is required: the monorepo regression tests drive real
+        # repositories, submodules and worktrees rather than mocking git.
+        nativeCheckInputs = [ pkgs.python3Packages.pytestCheckHook pkgs.git ];
+
+        meta = {
+          description = "Symlink curated editor/IDE config files into active repositories";
+          homepage = "https://github.com/dmitrii-galantsev/ewasd";
+          license = pkgs.lib.licenses.mit;
+          mainProgram = "ewasd";
+        };
+      };
+    in
+    {
+      packages = forAllSystems (system: rec {
+        ewasd = mkEwasd (pkgsFor system);
+        default = ewasd;
+      });
+
+      devShells = forAllSystems (system:
+        let pkgs = pkgsFor system; in {
+          default = pkgs.mkShell {
+            packages = [
+              (pkgs.python3.withPackages (ps: with ps; [
+                tomlkit termcolor pytest ruff mypy
+              ]))
+            ];
           };
-        };
-        default = self.packages.${_system}.ewasd;
-      });
+        }
+      );
 
-      apps = forAllSystems (system: _pkgs: {
-        default = {
-          type = "app";
-          program = "${self.packages.${system}.ewasd}/bin/ewasd";
-        };
-      });
-
-      devShells = forAllSystems (_system: pkgs: {
-        default = pkgs.mkShell {
-          packages = [ pkgs.go pkgs.git ];
-        };
-      });
-
-      overlays.default = final: _prev: {
-        ewasd = self.packages.${final.system}.ewasd;
+      overlays.default = final: prev: {
+        ewasd = mkEwasd final;
       };
     };
 }
