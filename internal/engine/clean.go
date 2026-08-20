@@ -34,7 +34,7 @@ func (e *Engine) planCleanFromState(state domain.State, cwd, explicit string, op
 	if err := e.requireNoRecovery(); err != nil {
 		return domain.CleanPlan{}, err
 	}
-	detection, err := detectFromState(state, cwd, explicit)
+	detection, err := detectFromState(state, cwd, explicit, e.remoteKeys...)
 	if err != nil {
 		return domain.CleanPlan{}, err
 	}

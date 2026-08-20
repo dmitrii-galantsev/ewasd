@@ -3,14 +3,7 @@
 `ewasd` is an explicit, journaled repository-overlay manager. Version 1 is a
 complete Go replacement for the former Python implementation.
 
-The single Go binary has two clients over the same engine:
-
-- a plan-first CLI for scripts and recovery;
-- an optional local desktop web console.
-
-Use `scripts/replace-python-with-go.sh` to import exact live Python-era links,
-verify them, retire generated legacy marker files, and atomically replace the
-installed Nix profile package.
+The Go binary is a plan-first CLI for scripts and recovery.
 
 ## What changed
 
@@ -38,43 +31,26 @@ completed workstation migration is recorded in
 ## Install
 
 ```bash
-# From this checkout. Existing Python links are migrated automatically; on a
-# new machine the legacy phase is simply skipped.
-./scripts/replace-python-with-go.sh
+nix build
+./result/bin/ewasd --version
 ```
 
-The replacement script is non-interactive. It aborts on ambiguous ownership or
-unsafe links rather than prompting or guessing.
+Or build the Go binary directly:
+
+```bash
+go build -o /tmp/ewasd ./cmd/ewasd
+```
 
 ## Build and test
 
 ```bash
 go test -race ./...
 go vet ./...
-go build -o /tmp/ewasd ./cmd/ewasd
-npm ci
-npm run test:browser
+go build ./cmd/ewasd
+gofmt -l .
 ```
 
-Or build the Nix flake:
-
-```bash
-nix build
-```
-
-The Playwright suite launches a completely isolated fixture server and tests
-two desktop layouts against real Chromium:
-
-- standard desktop (`1440×1000`);
-- 1440p desktop (`2560×1440`).
-
-It checks horizontal overflow, 44px control targets, console/page errors,
-serious or critical axe accessibility findings, repository switching, blocked
-plans, plan/apply/activity behavior, and stale reconcile rejection after
-filesystem drift. Responsive screenshots are written to
-`browser-artifacts/responsive/`.
-
-The replacement has a separate data root:
+ewasd has a data root:
 
 ```text
 $XDG_DATA_HOME/ewasd-v2/         # default: ~/.local/share/ewasd-v2
@@ -90,6 +66,87 @@ Override the state location with `EWASD_HOME`:
 ```bash
 export EWASD_HOME=/tmp/ewasd-comparison
 ```
+
+See [Configuration](#configuration) below for the full resolution order
+(including a global `--workspace` flag and a config file), `ewasd config`
+for inspecting what was actually resolved, and `ewasd init` for creating or
+cloning a data root.
+
+## Configuration
+
+Every subcommand that touches the data root — everything except `completion`,
+`help`, and `version` — resolves it in this order, first match wins:
+
+1. `--workspace PATH`, accepted before or after the subcommand
+   (`ewasd --workspace /path status` and `ewasd status --workspace /path`
+   both work);
+2. `EWASD_HOME`;
+3. `EWASD_NEXT_HOME` (a transitional alias kept for comparing this Go
+   rewrite against the old Python tool side by side);
+4. `EWASD_WORKSPACE` — the old Python tool's name for this same override,
+   kept for backward compatibility;
+5. the `workspace` key in `$XDG_CONFIG_HOME/ewasd/config.toml` (default
+   `~/.config/ewasd/config.toml`);
+6. `$XDG_DATA_HOME/ewasd-v2` (default `~/.local/share/ewasd-v2`).
+
+The old tool's legacy auto-discovery — guessing at a workspace by checking
+whether an `editors.toml` happened to exist at a few hardcoded locations,
+including `~/git/editor_workspaces` — is deliberately not restored. That
+kind of implicit, ambient-state guessing is exactly what this rewrite's
+explicit-registration model exists to remove.
+
+`config.toml` supports two keys, using the old tool's names:
+
+```toml
+# ~/.config/ewasd/config.toml
+workspace = "/absolute/or/~-relative/path"
+remote_keys = ["remote.origin.url", "remote.upstream.url"]
+```
+
+- `workspace` is a plain quoted string; a leading `~/` is expanded.
+- `remote_keys` is the ordered list of `git config` keys ewasd checks when
+  looking for a checkout's identifying remote URL; the first key with a
+  non-empty value wins. It defaults to `["remote.origin.url"]` when unset.
+
+There is no TOML library in this dependency-free build, so `config.toml` is
+parsed by a small, strict subset parser: comments, blank lines, quoted
+strings, and single-line string arrays (trailing comma allowed). Anything
+else — table headers, bare ints/bools, multiline arrays — is rejected with
+an error naming the file and the offending line, rather than silently
+misread. A missing `config.toml` is not an error; a malformed one always is.
+
+Run `ewasd config` to see exactly what was resolved and *why* — the data
+root and its source, the config file path and whether it exists, the
+remote keys and their source, and the state manifest's path and revision
+(if readable). It is read-only: it never creates the data root as a side
+effect.
+
+```text
+$ ewasd config
+data root:   /home/you/.local/share/ewasd-v2 (default)
+             exists: yes
+config file: /home/you/.config/ewasd/config.toml (not found)
+remote keys: [remote.origin.url] (default)
+state.json:  /home/you/.local/share/ewasd-v2/state.json (revision 7)
+```
+
+`ewasd init [--from-git URL]` creates or bootstraps a data root:
+
+```bash
+# Create a fresh, empty data root (idempotent; reports whether it already
+# existed).
+ewasd init
+
+# Bootstrap a data root on a second machine by cloning an existing one.
+ewasd init --from-git git@github.com:you/ewasd-data.git
+```
+
+`--from-git` refuses to clone into an existing non-empty data root — move
+it aside first rather than risk merging or overwriting it. After cloning,
+`init` creates any subdirectories the clone didn't have, locks the root
+down to mode `0700`, and validates that a cloned `state.json` actually
+parses at the schema version this binary understands, cleaning up the
+partial directory on any failure so a retry starts clean.
 
 ## CLI workflow
 
@@ -175,68 +232,95 @@ All commands support `--json`. Mutations without `--apply` return a complete
 plan. A stale `--revision` is rejected rather than silently applying an old
 decision to new state.
 
-The web API is stricter still: preview returns a random, one-use `plan_id` that
-expires after ten minutes. Apply must present that ID with the identical
-project, action, path, and revision. A failed or replayed apply requires a fresh
-preview.
+## MCP server
 
-## Web console
+`ewasd mcp` runs a Model Context Protocol server over stdio so an agent can
+drive the same engine the CLI does. It is a hand-rolled implementation with
+**zero external dependencies** (`go.mod` has none, and `flake.nix` relies on
+that with `vendorHash = null`) — newline-delimited JSON-RPC 2.0, one message
+per line, standard library only. Nothing but JSON-RPC frames is ever written
+to stdout; diagnostics go to stderr.
 
-Loopback mode generates a persistent random token on first start and prints a
-one-time pairing URL:
+It follows the CLI's preview-then-apply safety model exactly:
 
-```bash
-ewasd serve
-# open the printed http://127.0.0.1:7337/?token=... URL
+- Read-only tools (`status`, `detect`, and every `plan_*` tool) never mutate
+  anything. `status` is the call to make first — it bundles project health,
+  the manifest revision, the data root, best-effort detection for the
+  current directory, and outstanding recovery journals, so an agent rarely
+  needs to chain `detect` + `status` + `recover` separately.
+- `register` and `link` are safe to call directly. `link` only ever creates
+  symlinks that are currently missing; it never replaces a conflict.
+- `adopt`, `detach`, and `reconcile` each require the exact `revision` and
+  `fingerprint` returned by a matching `plan_adopt` / `plan_detach` /
+  `plan_reconcile` call made immediately before. These are never defaulted,
+  auto-filled, or auto-fetched — the whole safety model depends on a
+  specific, unchanged plan having been reviewed first. A stale value fails
+  the call instead of silently re-approving it.
+- Engine-level failures (not found, conflict, ambiguous detection, stale
+  revision, missing `revision`/`fingerprint`, ...) come back as ordinary tool
+  results — `{"ok": false, "error": "<code>", "message": ..., "hints": [...]}`
+  with `isError: false` — so a model can read the reason and self-correct
+  instead of blindly retrying. JSON-RPC-level errors and `isError: true` are
+  reserved for actual protocol problems: malformed JSON, unknown methods, and
+  unknown tool names.
+
+Exposed tools: `status`, `detect`, `plan_link`, `plan_adopt`, `plan_detach`,
+`plan_reconcile`, `plan_clean` (all read-only), plus `register`, `link`,
+`adopt`, `detach`, `reconcile`.
+
+Deliberately **not** exposed, and why:
+
+- **Applying `clean`.** `git clean` permanently deletes untracked files and
+  directories, and unlike adopt/detach/reconcile there is no way to pin the
+  exact working-tree state between preview and execution with a fingerprint.
+  `plan_clean` still returns the exact plan, including the literal `git`
+  command, for a human to review and run themselves.
+- **`unregister`.** The CLI gates this behind `--confirm` plus an
+  "empty checkout only" rule that is easy for a model to get subtly wrong.
+  Removing a project from the manifest should be a deliberate human action.
+- **Applying `recover`.** Crash recovery inspects and repairs interrupted,
+  partially-applied filesystem transactions. Recovering the wrong way can
+  destroy the only remaining copy of real content; it needs a human looking
+  at the actual paths on disk. `status` still reports outstanding recovery
+  journals, so an agent can always surface that attention is needed.
+- **Discarding recovery journals (`recover --discard`).** Same reasoning as
+  recover — discarding a journal without inspecting the filesystem first can
+  hide data loss instead of preventing it.
+
+Client configuration (stdio, no arguments beyond `mcp`):
+
+```json
+{
+  "mcpServers": {
+    "ewasd": {
+      "command": "ewasd",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
-For access from another trusted workstation, explicitly bind to the LAN and
-allowlist the host/IP that the browser will use. The same generated token
-remains mandatory; wildcard binds are rejected without `--allow-host`.
+## Shell completions
 
-```bash
-ewasd serve --listen 0.0.0.0:7337 \
-  --allow-host 192.168.1.50 \
-  --tls-cert /path/to/lan-cert.pem --tls-key /path/to/lan-key.pem
+`ewasd completion [bash|fish|zsh] [--install]` prints a completion script for
+the requested shell, or installs it to the conventional location for that
+shell when `--install` is given. Omit the shell name and it is detected from
+`$SHELL`. Every generated script is a thin shell-specific wrapper: the actual
+completion decisions (which verb, which flag, which project ID, which
+managed file) are all resolved dynamically against live state by a hidden
+`ewasd __complete` helper, not hard-coded into the script.
+
+```sh
+ewasd completion bash --install   # ~/.local/share/bash-completion/completions/ewasd
+ewasd completion zsh  --install   # ~/.local/share/zsh/site-functions/_ewasd (add to $fpath)
+ewasd completion fish --install   # ~/.config/fish/completions/ewasd.fish
 ```
 
-Open the printed pairing URL once. The UI moves the token to
-`sessionStorage`, removes it from the address bar, and sends it as a bearer
-token. The token is generated at `$EWASD_HOME/console.token` with mode
-`0600`; `EWASD_TOKEN` can override it without exposing a secret in `ps`.
-The server rejects unapproved Host headers, validates same-origin browser
-writes, caps request bodies, and
-serves a restrictive content-security policy. For quick testing on an isolated
-trusted LAN the TLS flags can be omitted; use TLS or a VPN for routine remote
-access. Never expose this filesystem authority directly to the public internet.
-
-## Replacing Python ewasd
-
-```bash
-./scripts/replace-python-with-go.sh
-```
-
-The script builds and activates the Go package first, then previews and applies
-`migrate-legacy` against generated `.ewasd_gitignore` inventories, verifies
-every exact link, and archives the marker files and a migration receipt. The Nix
-profile is replaced without a command-absence window. Upgradeable elements use `profile upgrade`;
-otherwise Go ewasd is added at higher priority and verified before the hidden
-Python element is removed. The Python workspace is retained as a
-read-only rollback source; the live links no longer point to it.
-
-The script never gives the entire working tree to a Nix `path:` flake. It first
-creates an allowlisted installer source containing only `flake.*`, `go.mod`,
-`cmd/`, and `internal/` under the private Go state. This prevents ignored or
-untracked project files from being copied into the world-readable Nix store.
-
-The migration command can also be run directly:
-
-```bash
-ewasd migrate-legacy --workspace ~/.local/share/ewasd \
-  --scan-root ~/git
-ewasd migrate-legacy --workspace ~/.local/share/ewasd \
-  --scan-root ~/git --apply
-```
+`--project` and `--root` complete registered project IDs, names, and roots;
+`ewasd detach <TAB>` completes only the paths ewasd actually manages for the
+detected or selected project; `ewasd adopt <TAB>` completes unmanaged files
+and directories in that checkout; `--mode` and `--discard` complete from live
+clean modes and outstanding recovery journals respectively.
 
 ## Current scope
 
@@ -247,7 +331,7 @@ Supported:
   monorepo subdirectory;
 - adoption, verification, reconciliation, detach, activity history, and crash
   recovery;
-- CLI JSON output and a responsive web console.
+- CLI JSON output.
 
 Deliberately omitted:
 
@@ -255,8 +339,7 @@ Deliberately omitted:
 - deleting source content;
 - overwriting conflicts or adopting foreign symlinks;
 - escaping/broken nested symlinks or special files inside adopted directories;
-- templates, profiles/inheritance, hooks, package installation, Git push, and
-  an MCP surface.
+- templates, profiles/inheritance, hooks, package installation, and Git push.
 
 Contained relative nested symlinks are preserved exactly. Other omitted features
 can be reconsidered without weakening the storage and recovery invariants.

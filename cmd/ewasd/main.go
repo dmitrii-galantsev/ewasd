@@ -1,30 +1,24 @@
 package main
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 
+	"github.com/dmitrii-galantsev/ewasd/internal/completion"
+	"github.com/dmitrii-galantsev/ewasd/internal/config"
 	"github.com/dmitrii-galantsev/ewasd/internal/domain"
 	"github.com/dmitrii-galantsev/ewasd/internal/engine"
-	"github.com/dmitrii-galantsev/ewasd/internal/httpapi"
-	"github.com/dmitrii-galantsev/ewasd/internal/legacy"
+	"github.com/dmitrii-galantsev/ewasd/internal/gitutil"
+	"github.com/dmitrii-galantsev/ewasd/internal/mcpserver"
 	"github.com/dmitrii-galantsev/ewasd/internal/store"
 )
 
-const version = "1.1.0"
+const version = "2.0.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -33,7 +27,37 @@ func main() {
 	}
 }
 
-func run(args []string) error {
+func run(rawArgs []string) error {
+	if len(rawArgs) == 0 {
+		usage()
+		return nil
+	}
+	if rawArgs[0] == "__complete" {
+		// __complete is a machine-facing helper invoked from a live shell's
+		// TAB key. It must see the *raw*, unstripped argument list —
+		// including a "--workspace" flag or its still-being-typed value —
+		// so the completion engine in internal/completion can recognize
+		// "--workspace" as a flag name to offer and complete its value with
+		// the directory marker, the same way it already does for --root.
+		// Stripping it here first (the way every other command's dispatch
+		// does, below) would delete the very word being completed. It must
+		// also never propagate a hard error or print an "error: ..." line
+		// to a user's terminal, so its own setup failures (e.g. an
+		// unwritable EWASD_HOME) are swallowed here rather than returned
+		// like every other command's.
+		runComplete(rawArgs[1:])
+		return nil
+	}
+
+	// --workspace is accepted by every subcommand that builds a store
+	// (everything below except completion script generation, help, and
+	// version), both before and after the subcommand name, without every
+	// flag.NewFlagSet below having to declare it individually. Stripping it
+	// once, here, before dispatch is what makes that possible.
+	workspaceFlag, args, err := extractWorkspaceFlag(rawArgs)
+	if err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		usage()
 		return nil
@@ -45,12 +69,30 @@ func run(args []string) error {
 	case "help", "-h", "--help":
 		usage()
 		return nil
+	case "completion":
+		return completion.Run(args[1:], os.Getenv, os.Stdout)
+	case "config":
+		// config is intentionally handled before the store is built below:
+		// its entire purpose is read-only provenance reporting, and it must
+		// never create the data root as a side effect.
+		return configCmd(workspaceFlag, args[1:])
+	case "init":
+		// init manages the data root's creation itself (including the
+		// --from-git clone-then-validate path), so it must run before the
+		// unconditional store.New below rather than through it.
+		return initCmd(workspaceFlag, args[1:])
 	}
-	stateStore, err := store.New(dataRoot())
+	resolved, err := resolveWorkspace(workspaceFlag)
 	if err != nil {
 		return err
 	}
-	domainEngine := engine.New(stateStore)
+	stateStore, err := store.New(resolved.DataRoot)
+	if err != nil {
+		return err
+	}
+	// Detection identity policy comes from the resolved configuration, so the
+	// remote_keys setting reaches every code path that inspects a checkout.
+	domainEngine := engine.New(stateStore).WithRemoteKeys(resolved.RemoteKeys...)
 	switch args[0] {
 	case "register":
 		return register(domainEngine, args[1:])
@@ -70,15 +112,66 @@ func run(args []string) error {
 		return detach(domainEngine, args[1:])
 	case "reconcile":
 		return reconcile(domainEngine, args[1:])
+	case "migrate":
+		return migrate(domainEngine, args[1:])
 	case "recover":
 		return recover(domainEngine, args[1:])
-	case "migrate-legacy":
-		return migrateLegacy(domainEngine, stateStore, args[1:])
-	case "serve":
-		return serve(domainEngine, args[1:])
+	case "mcp":
+		return runMCP(domainEngine, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+// runComplete backs the hidden `ewasd __complete` helper. It deliberately
+// swallows every error instead of returning it: a completion helper wired
+// into a shell's TAB key must never print a Go error or exit non-zero, so
+// any failure to build the engine (an unwritable or unreadable EWASD_HOME,
+// for example) simply yields no completion candidates.
+func runComplete(args []string) {
+	resolved, err := resolveWorkspace("")
+	if err != nil {
+		return
+	}
+	stateStore, err := store.New(resolved.DataRoot)
+	if err != nil {
+		return
+	}
+	completion.RunComplete(engine.New(stateStore), args, os.Stdout)
+}
+
+// extractWorkspaceFlag removes the first "--workspace PATH" or
+// "--workspace=PATH" occurrence from args, wherever it appears, and
+// returns its value plus the remaining arguments in their original order.
+// This is what lets every subcommand accept --workspace both before and
+// after its name without each of the ~12 flag.NewFlagSets below having to
+// declare it individually.
+func extractWorkspaceFlag(args []string) (value string, rest []string, err error) {
+	rest = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--workspace":
+			if i+1 >= len(args) {
+				return "", nil, errors.New("flag needs an argument: --workspace")
+			}
+			value = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--workspace="):
+			value = strings.TrimPrefix(arg, "--workspace=")
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return value, rest, nil
+}
+
+func runMCP(domainEngine *engine.Engine, args []string) error {
+	set := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return mcpserver.New(domainEngine, version).Run(os.Stdin, os.Stdout, os.Stderr)
 }
 
 func detect(domainEngine *engine.Engine, args []string) error {
@@ -182,194 +275,6 @@ func printCleanPlan(plan domain.CleanPlan) {
 	}
 	fmt.Printf("protected by %d exact ewasd pattern(s)\n", len(plan.ProtectedPatterns))
 	fmt.Println("command:", strings.Join(plan.Command, " "))
-}
-
-func migrateLegacy(domainEngine *engine.Engine, stateStore *store.Store, args []string) error {
-	set := flag.NewFlagSet("migrate-legacy", flag.ContinueOnError)
-	workspace := set.String("workspace", legacyWorkspaceDefault(), "legacy Python ewasd workspace")
-	apply := set.Bool("apply", false, "copy sources, switch exact links, and retire generated markers")
-	jsonOutput := set.Bool("json", false, "emit JSON")
-	keepMarkers := set.Bool("keep-markers", false, "leave generated .ewasd_gitignore files after verified import")
-	var scanRoots pathList
-	set.Var(&scanRoots, "scan-root", "root to scan for generated .ewasd_gitignore files (repeatable)")
-	if err := set.Parse(args); err != nil {
-		return err
-	}
-	if len(scanRoots) == 0 {
-		home, _ := os.UserHomeDir()
-		defaultRoot := filepath.Join(home, "git")
-		if info, err := os.Stat(defaultRoot); err == nil && info.IsDir() {
-			scanRoots = append(scanRoots, defaultRoot)
-		} else {
-			scanRoots = append(scanRoots, ".")
-		}
-	}
-	if *apply {
-		if err := legacy.ResumeFinalization(stateStore.Root()); err != nil {
-			return fmt.Errorf("resume legacy marker finalization: %w", err)
-		}
-	}
-	plan, err := legacy.Discover(*workspace, scanRoots)
-	if err != nil {
-		return err
-	}
-	if !*apply {
-		if *jsonOutput {
-			return printJSON(plan)
-		}
-		printLegacyPlan(plan)
-		return nil
-	}
-	if snapshot, err := domainEngine.Snapshot(); err == nil && len(snapshot.Recovery) > 0 {
-		if messages, recoverErr := domainEngine.Recover(); recoverErr != nil {
-			return fmt.Errorf("recover prior migration after %v: %w", messages, recoverErr)
-		}
-	}
-	snapshotBefore, err := domainEngine.Snapshot()
-	if err != nil {
-		return err
-	}
-	markAlreadyMigrated(&plan, snapshotBefore)
-	for _, skipped := range plan.Skipped {
-		if skipped.Blocking {
-			return fmt.Errorf("legacy migration is blocked at %s: %s", skipped.Path, skipped.Reason)
-		}
-	}
-	results := []domain.ApplyResult{}
-	for _, project := range plan.Projects {
-		result, err := domainEngine.ImportLegacyProject(project)
-		if err != nil {
-			return fmt.Errorf("import %s (%s): %w", project.Name, project.Root, err)
-		}
-		results = append(results, result)
-	}
-	for {
-		snapshot, err := domainEngine.Snapshot()
-		if err != nil {
-			return err
-		}
-		if len(snapshot.Recovery) == 0 {
-			break
-		}
-		messages, err := domainEngine.Recover()
-		if err != nil {
-			return fmt.Errorf("recover imported links after %v: %w", messages, err)
-		}
-	}
-	snapshot, err := domainEngine.Snapshot()
-	if err != nil {
-		return err
-	}
-	for _, projectPlan := range plan.Projects {
-		var view *domain.ProjectView
-		for i := range snapshot.Projects {
-			if snapshot.Projects[i].Root == projectPlan.Root {
-				view = &snapshot.Projects[i]
-				break
-			}
-		}
-		if view == nil || view.Health.Linked != view.Health.Total || view.Health.Linked < len(projectPlan.Entries) || view.Health.Conflicts != 0 || view.Health.Missing != 0 || view.Health.SourceMissing != 0 || !view.GitIgnoreOK {
-			return fmt.Errorf("post-migration verification failed for %s", projectPlan.Root)
-		}
-	}
-	archives := []string{}
-	if !*keepMarkers {
-		archives, err = legacy.FinalizeMarkers(plan.Markers, plan.LegacyWorkspace, stateStore.Root())
-		if err != nil {
-			return fmt.Errorf("finalize legacy markers (resume with the same command): %w", err)
-		}
-	}
-	receipt := map[string]any{
-		"ok": true, "outcome": "completed", "legacy_workspace": plan.LegacyWorkspace,
-		"data_root": stateStore.Root(), "projects": results, "marker_archives": archives,
-		"skipped": plan.Skipped, "completed_at": time.Now().UTC(),
-	}
-	receiptData, err := json.MarshalIndent(receipt, "", "  ")
-	if err != nil {
-		return err
-	}
-	receiptPath := filepath.Join(stateStore.Root(), "legacy", "migration-receipt.json")
-	if err := store.AtomicWrite(receiptPath, append(receiptData, '\n'), 0o600); err != nil {
-		return err
-	}
-	if *jsonOutput {
-		return printJSON(receipt)
-	}
-	fmt.Printf("legacy migration complete · %d project(s) · %d link(s) · receipt %s\n", len(results), countLegacyEntries(plan), receiptPath)
-	return nil
-}
-
-func markAlreadyMigrated(plan *domain.LegacyMigrationPlan, snapshot domain.Snapshot) {
-	markerRoots := map[string]string{}
-	for _, marker := range plan.Markers {
-		markerRoots[marker.Path] = marker.GitRoot
-	}
-	for index := range plan.Skipped {
-		item := &plan.Skipped[index]
-		if !item.Blocking || item.Marker == "" || item.Path == "" {
-			continue
-		}
-		root := markerRoots[item.Marker]
-		if root == "" {
-			continue
-		}
-		target := filepath.Clean(filepath.Join(root, filepath.FromSlash(item.Path)))
-		for _, project := range snapshot.Projects {
-			for _, entry := range project.EntriesView {
-				if filepath.Clean(entry.Target) == target && entry.Status == "linked" {
-					item.Blocking = false
-					item.Reason = "already migrated and healthy in Go state"
-				}
-			}
-		}
-	}
-}
-
-type pathList []string
-
-func (values *pathList) String() string { return strings.Join(*values, ",") }
-func (values *pathList) Set(value string) error {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return errors.New("scan root cannot be empty")
-	}
-	*values = append(*values, value)
-	return nil
-}
-
-func printLegacyPlan(plan domain.LegacyMigrationPlan) {
-	fmt.Printf("legacy migration preview · %d project(s) · %d generated marker(s)\n", len(plan.Projects), len(plan.Markers))
-	for _, project := range plan.Projects {
-		fmt.Printf("\n%s\n  checkout: %s\n  source:   %s\n", project.Name, project.Root, project.SourceRoot)
-		for _, entry := range project.Entries {
-			fmt.Printf("  %-10s %s\n", entry.Kind, entry.Path)
-		}
-	}
-	for _, skipped := range plan.Skipped {
-		label := "stale"
-		if skipped.Blocking {
-			label = "BLOCKING"
-		}
-		fmt.Printf("\n  %-8s %s · %s\n", label, skipped.Path, skipped.Reason)
-	}
-	fmt.Println("\npreview only; rerun with --apply after reviewing this inventory")
-}
-
-func countLegacyEntries(plan domain.LegacyMigrationPlan) int {
-	total := 0
-	for _, project := range plan.Projects {
-		total += len(project.Entries)
-	}
-	return total
-}
-
-func legacyWorkspaceDefault() string {
-	base := os.Getenv("XDG_DATA_HOME")
-	if base == "" {
-		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(base, "ewasd")
 }
 
 func unregister(domainEngine *engine.Engine, args []string) error {
@@ -508,6 +413,50 @@ func detach(domainEngine *engine.Engine, args []string) error {
 	return printResult(result, err, *jsonOutput)
 }
 
+// migrate repoints managed symlinks after the ewasd data root has been moved.
+//
+// This is the successor to the Python implementation's
+// `ewasd migrate --old-workspace`. That version had to scan a directory tree
+// for broken symlinks and string-replace their targets, which is why it also
+// needed a --scan-dir flag. The manifest makes this a replay instead: every
+// managed destination is already recorded, so the set of links to repoint is
+// known exactly and no scan flag is required. A link is only repointed when it
+// currently points at exactly the old root's copy of its recorded source;
+// anything else stays an untouched conflict.
+func migrate(domainEngine *engine.Engine, args []string) error {
+	set := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	oldWorkspace := set.String("old-workspace", "", "previous data root the existing symlinks point at")
+	project := set.String("project", "", "limit to one registered project ID or name")
+	apply := set.Bool("apply", false, "apply the reviewed plan")
+	revision := set.Uint64("revision", 0, "revision printed by the plan")
+	fingerprint := set.String("fingerprint", "", "fingerprint printed by the reviewed plan")
+	jsonOutput := set.Bool("json", false, "emit JSON")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if *oldWorkspace == "" {
+		return errors.New("--old-workspace is required: pass the previous data root that the existing symlinks point at")
+	}
+	plan, err := domainEngine.PlanRelocate(*oldWorkspace, *project)
+	if err != nil {
+		return err
+	}
+	if !*apply {
+		return printPlan(plan, *jsonOutput)
+	}
+	if *revision != plan.ExpectedRevision {
+		return fmt.Errorf("supply --revision %d from the current plan", plan.ExpectedRevision)
+	}
+	if *fingerprint != plan.Fingerprint {
+		return fmt.Errorf("supply --fingerprint %s from the current plan", plan.Fingerprint)
+	}
+	if !plan.Safe {
+		return fmt.Errorf("%w: %s", engine.ErrConflict, plan.Summary)
+	}
+	result, err := domainEngine.Relocate(*oldWorkspace, *project, *revision, *fingerprint)
+	return printResult(result, err, *jsonOutput)
+}
+
 func reconcile(domainEngine *engine.Engine, args []string) error {
 	set := flag.NewFlagSet("reconcile", flag.ContinueOnError)
 	root := set.String("root", "", "registered root or project ID")
@@ -602,126 +551,6 @@ func errorText(err error) string {
 	return err.Error()
 }
 
-func serve(domainEngine *engine.Engine, args []string) error {
-	set := flag.NewFlagSet("serve", flag.ContinueOnError)
-	listen := set.String("listen", "127.0.0.1:7337", "listen address")
-	tokenFlag := set.String("token", "", "bearer token override (prefer EWASD_TOKEN or the generated token file)")
-	tlsCert := set.String("tls-cert", "", "PEM certificate for HTTPS")
-	tlsKey := set.String("tls-key", "", "PEM private key for HTTPS")
-	var allowHosts stringList
-	set.Var(&allowHosts, "allow-host", "additional approved Host name or IP (repeatable; required for wildcard LAN binds)")
-	if err := set.Parse(args); err != nil {
-		return err
-	}
-	host, _, err := net.SplitHostPort(*listen)
-	if err != nil {
-		return fmt.Errorf("invalid listen address: %w", err)
-	}
-	if (*tlsCert == "") != (*tlsKey == "") {
-		return errors.New("--tls-cert and --tls-key must be supplied together")
-	}
-	token, err := loadConsoleToken(dataRoot(), *tokenFlag)
-	if err != nil {
-		return err
-	}
-	_, port, _ := net.SplitHostPort(*listen)
-	approvedHosts := []string{}
-	if isLoopback(host) {
-		approvedHosts = append(approvedHosts, "127.0.0.1", "localhost", "::1")
-	} else if host != "0.0.0.0" && host != "::" && host != "[::]" {
-		approvedHosts = append(approvedHosts, strings.Trim(host, "[]"))
-	}
-	approvedHosts = append(approvedHosts, allowHosts...)
-	if len(approvedHosts) == 0 {
-		return errors.New("wildcard listen requires at least one --allow-host IP or DNS name")
-	}
-	server, err := httpapi.New(domainEngine, token, approvedHosts...)
-	if err != nil {
-		return err
-	}
-	scheme := "http"
-	if *tlsCert != "" {
-		scheme = "https"
-	}
-	displayHost := host
-	if host == "0.0.0.0" || host == "::" || host == "[::]" {
-		displayHost = allowHosts[0]
-	}
-	fmt.Printf("ewasd console: %s://%s/?token=%s\n", scheme, net.JoinHostPort(strings.Trim(displayHost, "[]"), port), token)
-	fmt.Println("pairing token is stored locally with mode 0600; the browser removes it from the address bar after loading")
-	httpServer := &http.Server{
-		Addr: *listen, Handler: server.Handler(),
-		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
-		WriteTimeout: 5 * time.Minute, IdleTimeout: 60 * time.Second,
-	}
-	serverErrors := make(chan error, 1)
-	go func() {
-		if *tlsCert != "" {
-			serverErrors <- httpServer.ListenAndServeTLS(*tlsCert, *tlsKey)
-			return
-		}
-		serverErrors <- httpServer.ListenAndServe()
-	}()
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(signals)
-	select {
-	case err := <-serverErrors:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
-	case <-signals:
-		fmt.Println("shutting down after active requests finish…")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		return httpServer.Shutdown(ctx)
-	}
-}
-
-type stringList []string
-
-func (values *stringList) String() string { return strings.Join(*values, ",") }
-func (values *stringList) Set(value string) error {
-	value = strings.TrimSpace(value)
-	if value == "" || strings.Contains(value, "://") || strings.ContainsAny(value, "/?#") {
-		return errors.New("allow-host must be a bare IP or DNS host without a scheme or path")
-	}
-	*values = append(*values, strings.Trim(value, "[]"))
-	return nil
-}
-
-func loadConsoleToken(root, explicit string) (string, error) {
-	if explicit == "" {
-		explicit = os.Getenv("EWASD_TOKEN")
-	}
-	if explicit != "" {
-		if len(explicit) < 24 {
-			return "", errors.New("console token must contain at least 24 characters")
-		}
-		return explicit, nil
-	}
-	path := filepath.Join(root, "console.token")
-	if data, err := os.ReadFile(path); err == nil {
-		token := strings.TrimSpace(string(data))
-		if len(token) < 24 {
-			return "", errors.New("stored console token is invalid; remove console.token and restart")
-		}
-		return token, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	token := hex.EncodeToString(bytes)
-	if err := store.AtomicWrite(path, []byte(token+"\n"), 0o600); err != nil {
-		return "", err
-	}
-	return token, nil
-}
-
 func printPlan(plan domain.Plan, jsonOutput bool) error {
 	if jsonOutput {
 		return printJSON(plan)
@@ -763,15 +592,91 @@ func printJSON(value any) error {
 	return encoder.Encode(value)
 }
 
-func dataRoot() string {
-	if explicit := os.Getenv("EWASD_HOME"); explicit != "" {
-		return explicit
+// Resolved describes where the data root and remote_keys came from, so
+// `ewasd config` can report provenance rather than just resolved values.
+type Resolved struct {
+	DataRoot         string
+	DataRootSource   string
+	ConfigPath       string
+	ConfigExists     bool
+	RemoteKeys       []string
+	RemoteKeysSource string
+}
+
+// Provenance source labels for Resolved. These are also the exact strings
+// `ewasd config` prints and returns in --json.
+const (
+	sourceFlag           = "flag"
+	sourceEwasdHome      = "EWASD_HOME"
+	sourceEwasdNextHome  = "EWASD_NEXT_HOME"
+	sourceEwasdWorkspace = "EWASD_WORKSPACE"
+	sourceConfigTOML     = "config.toml"
+	sourceDefault        = "default"
+)
+
+// resolveWorkspace implements ewasd's full workspace/data-root resolution
+// order:
+//
+//  1. --workspace flag (flagValue, already stripped from argv by
+//     extractWorkspaceFlag)
+//  2. EWASD_HOME environment variable
+//  3. EWASD_NEXT_HOME environment variable (kept in its existing position,
+//     immediately after EWASD_HOME: this was a transitional alias for
+//     comparing the Go rewrite against the old Python tool side by side,
+//     and predates every level below)
+//  4. EWASD_WORKSPACE environment variable — the *old* Python tool's name
+//     for this same override, restored here for backward compatibility
+//  5. the "workspace" key in $XDG_CONFIG_HOME/ewasd/config.toml
+//  6. $XDG_DATA_HOME/ewasd-v2 (default ~/.local/share/ewasd-v2)
+//
+// Deliberately NOT restored: the old tool's legacy auto-discovery, which
+// guessed at a workspace by checking for the presence of an
+// "editors.toml" file at $XDG_DATA_HOME/ewasd, next to the package
+// install location, and at ~/git/editor_workspaces. That heuristic is
+// exactly the kind of implicit, ambient-state guessing this rewrite's
+// explicit-registration model exists to remove; a workspace is either
+// named explicitly (flag, env, config) or defaults predictably (XDG data
+// home), never inferred from what happens to exist on disk.
+//
+// config.toml is loaded unconditionally (not only when a lower-priority
+// source is actually needed), because remote_keys has no other resolution
+// path and a malformed config.toml must be reported clearly rather than
+// silently ignored on every invocation, not just the ones that happen to
+// fall through to level 5.
+func resolveWorkspace(flagValue string) (Resolved, error) {
+	configPath := config.FilePath()
+	cfg, configExists, err := config.Load(configPath)
+	if err != nil {
+		return Resolved{}, err
 	}
-	// Compatibility with the parallel preview; the final replacement uses
-	// EWASD_HOME and ewasd-v2 by default.
-	if explicit := os.Getenv("EWASD_NEXT_HOME"); explicit != "" {
-		return explicit
+	resolved := Resolved{ConfigPath: configPath, ConfigExists: configExists}
+
+	switch {
+	case flagValue != "":
+		resolved.DataRoot, resolved.DataRootSource = config.ExpandHome(flagValue), sourceFlag
+	case os.Getenv("EWASD_HOME") != "":
+		resolved.DataRoot, resolved.DataRootSource = config.ExpandHome(os.Getenv("EWASD_HOME")), sourceEwasdHome
+	case os.Getenv("EWASD_NEXT_HOME") != "":
+		resolved.DataRoot, resolved.DataRootSource = config.ExpandHome(os.Getenv("EWASD_NEXT_HOME")), sourceEwasdNextHome
+	case os.Getenv("EWASD_WORKSPACE") != "":
+		resolved.DataRoot, resolved.DataRootSource = config.ExpandHome(os.Getenv("EWASD_WORKSPACE")), sourceEwasdWorkspace
+	case cfg.Workspace != "":
+		resolved.DataRoot, resolved.DataRootSource = cfg.Workspace, sourceConfigTOML
+	default:
+		resolved.DataRoot, resolved.DataRootSource = defaultDataRoot(), sourceDefault
 	}
+
+	if len(cfg.RemoteKeys) > 0 {
+		resolved.RemoteKeys, resolved.RemoteKeysSource = cfg.RemoteKeys, sourceConfigTOML
+	} else {
+		resolved.RemoteKeys, resolved.RemoteKeysSource = config.DefaultRemoteKeys, sourceDefault
+	}
+	return resolved, nil
+}
+
+// defaultDataRoot is resolution level 6: $XDG_DATA_HOME/ewasd-v2, default
+// ~/.local/share/ewasd-v2.
+func defaultDataRoot() string {
 	base := os.Getenv("XDG_DATA_HOME")
 	if base == "" {
 		home, _ := os.UserHomeDir()
@@ -780,20 +685,250 @@ func dataRoot() string {
 	return filepath.Join(base, "ewasd-v2")
 }
 
+// configCmd implements `ewasd config`: read-only reporting of resolved
+// configuration and, for each value, where it came from. It must never
+// create the data root as a side effect, which is exactly why it never
+// calls store.New.
+func configCmd(workspaceFlag string, args []string) error {
+	set := flag.NewFlagSet("config", flag.ContinueOnError)
+	jsonOutput := set.Bool("json", false, "emit JSON")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	resolved, err := resolveWorkspace(workspaceFlag)
+	if err != nil {
+		return err
+	}
+	dataRootAbs, err := filepath.Abs(resolved.DataRoot)
+	if err != nil {
+		return fmt.Errorf("resolve data root: %w", err)
+	}
+	rootExists := isDir(dataRootAbs)
+	state := readStateInfo(filepath.Join(dataRootAbs, "state.json"))
+
+	if *jsonOutput {
+		return printJSON(map[string]any{
+			"data_root": map[string]any{
+				"path":   dataRootAbs,
+				"source": resolved.DataRootSource,
+				"exists": rootExists,
+			},
+			"config_file": map[string]any{
+				"path":   resolved.ConfigPath,
+				"exists": resolved.ConfigExists,
+			},
+			"remote_keys": map[string]any{
+				"values": resolved.RemoteKeys,
+				"source": resolved.RemoteKeysSource,
+			},
+			"state": state,
+		})
+	}
+
+	fmt.Printf("data root:   %s (%s)\n", dataRootAbs, resolved.DataRootSource)
+	fmt.Printf("             exists: %s\n", yesNo(rootExists))
+	fmt.Printf("config file: %s (%s)\n", resolved.ConfigPath, existsWord(resolved.ConfigExists))
+	fmt.Printf("remote keys: [%s] (%s)\n", strings.Join(resolved.RemoteKeys, ", "), resolved.RemoteKeysSource)
+	switch {
+	case !state.Exists:
+		fmt.Printf("state.json:  %s (not found)\n", state.Path)
+	case state.Error != "":
+		fmt.Printf("state.json:  %s (%s)\n", state.Path, state.Error)
+	default:
+		fmt.Printf("state.json:  %s (revision %d)\n", state.Path, *state.Revision)
+	}
+	return nil
+}
+
+// stateInfo is the read-only view of state.json shown by `ewasd config`.
+// Revision is a pointer purely so its absence (file missing, or present
+// but unparsable) is distinguishable from an honest revision 0 in --json
+// output (a nil pointer omits the field entirely; see the json tag).
+type stateInfo struct {
+	Path     string  `json:"path"`
+	Exists   bool    `json:"exists"`
+	Revision *uint64 `json:"revision,omitempty"`
+	Error    string  `json:"error,omitempty"`
+}
+
+// readStateInfo inspects path (a candidate state.json) without ever
+// creating or modifying anything, so it is safe to call from the
+// read-only `config` command.
+func readStateInfo(path string) stateInfo {
+	info := stateInfo{Path: path}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return info
+	}
+	if err != nil {
+		info.Error = "unreadable: " + err.Error()
+		return info
+	}
+	info.Exists = true
+	var partial struct {
+		SchemaVersion int    `json:"schema_version"`
+		Revision      uint64 `json:"revision"`
+	}
+	if err := json.Unmarshal(data, &partial); err != nil {
+		info.Error = "does not parse: " + err.Error()
+		return info
+	}
+	if partial.SchemaVersion != domain.SchemaVersion {
+		info.Error = fmt.Sprintf("unsupported schema version %d (expected %d)", partial.SchemaVersion, domain.SchemaVersion)
+		return info
+	}
+	revision := partial.Revision
+	info.Revision = &revision
+	return info
+}
+
+// initCmd implements `ewasd init [--from-git URL]`.
+func initCmd(workspaceFlag string, args []string) error {
+	set := flag.NewFlagSet("init", flag.ContinueOnError)
+	fromGit := set.String("from-git", "", "clone the workspace from a Git repository URL")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	resolved, err := resolveWorkspace(workspaceFlag)
+	if err != nil {
+		return err
+	}
+	root, err := filepath.Abs(resolved.DataRoot)
+	if err != nil {
+		return fmt.Errorf("resolve data root: %w", err)
+	}
+	if *fromGit != "" {
+		return initFromGit(root, *fromGit)
+	}
+	return initFresh(root)
+}
+
+// initFresh creates the data root and its required subdirectories with
+// mode 0700, idempotently, reporting whether it already existed.
+func initFresh(root string) error {
+	existedBefore := isDir(root)
+	stateStore, err := store.New(root)
+	if err != nil {
+		return err
+	}
+	if existedBefore {
+		fmt.Printf("data root already exists at %s\n", stateStore.Root())
+	} else {
+		fmt.Printf("initialized data root at %s\n", stateStore.Root())
+	}
+	return nil
+}
+
+// initFromGit bootstraps the data root by cloning url into it — how a
+// second machine gets set up from an existing workspace. It refuses to
+// clone into an existing non-empty root, and cleans up after itself on any
+// failure so a retry starts from a clean slate.
+func initFromGit(root, url string) error {
+	existedBefore := isDir(root)
+	if existedBefore {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return fmt.Errorf("inspect existing data root: %w", err)
+		}
+		if len(entries) > 0 {
+			return fmt.Errorf("refusing to clone into non-empty data root %s; move it aside first", root)
+		}
+	}
+	if err := gitutil.CloneRepository(url, root); err != nil {
+		cleanupPartialRoot(root, existedBefore)
+		return err
+	}
+	if err := finishFromGitInit(root); err != nil {
+		cleanupPartialRoot(root, existedBefore)
+		return err
+	}
+	fmt.Printf("initialized data root at %s from %s\n", root, url)
+	return nil
+}
+
+// finishFromGitInit runs the post-clone steps: create any required
+// subdirectories the cloned repository didn't have, lock down permissions,
+// and validate that a cloned state.json (if any) actually parses as the
+// schema version this binary understands.
+func finishFromGitInit(root string) error {
+	for _, dir := range []string{"profiles", "archive", "transactions", "recovery"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
+			return fmt.Errorf("create %s: %w", dir, err)
+		}
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		return fmt.Errorf("chmod data root: %w", err)
+	}
+	return validateClonedState(root)
+}
+
+// validateClonedState reports clearly, rather than leaving a
+// half-initialised root, when a cloned state.json doesn't parse as the
+// expected schema version. A cloned repository with no state.json at all
+// is fine — there is nothing to validate.
+func validateClonedState(root string) error {
+	path := filepath.Join(root, "state.json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read cloned state.json: %w", err)
+	}
+	var state domain.State
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("cloned state.json does not parse: %w", err)
+	}
+	if state.SchemaVersion != domain.SchemaVersion {
+		return fmt.Errorf("cloned state.json has schema version %d, expected %d", state.SchemaVersion, domain.SchemaVersion)
+	}
+	return nil
+}
+
+// cleanupPartialRoot removes whatever a failed clone-and-validate attempt
+// left behind, so a retry of `ewasd init --from-git` starts clean. If the
+// root pre-existed (empty, since initFromGit already refused a non-empty
+// one), only its contents are removed, not the directory itself; if this
+// attempt created the root, the whole thing is removed.
+func cleanupPartialRoot(root string, existedBefore bool) {
+	if !existedBefore {
+		_ = os.RemoveAll(root)
+		return
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		_ = os.RemoveAll(filepath.Join(root, entry.Name()))
+	}
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func existsWord(value bool) string {
+	if value {
+		return "found"
+	}
+	return "not found"
+}
+
 func canonicalLoose(path string) string {
 	abs, _ := filepath.Abs(path)
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		return resolved
 	}
 	return abs
-}
-
-func isLoopback(host string) bool {
-	if host == "localhost" || host == "" {
-		return true
-	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
-	return ip != nil && ip.IsLoopback()
 }
 
 func empty(value, fallback string) string {
@@ -807,6 +942,8 @@ func usage() {
 	fmt.Print(`ewasd — explicit, journaled repository overlays
 
 Usage:
+  ewasd config     [--json]  # show resolved configuration paths and settings
+  ewasd init       [--from-git URL]
   ewasd register   --root PATH [--name NAME]
   ewasd detect     [--root PATH] [--project ID|NAME]
   ewasd link       [--root PATH] [--project ID|NAME] [--dry-run]
@@ -816,13 +953,16 @@ Usage:
   ewasd adopt      --root PATH|ID [--revision N --apply] RELATIVE_PATH
   ewasd detach     --root PATH|ID [--revision N --apply] RELATIVE_PATH
   ewasd reconcile  --root PATH|ID [--revision N --apply]
+  ewasd migrate    --old-workspace PATH [--project ID|NAME] [--revision N --fingerprint HASH --apply]
   ewasd recover    [--apply] [--discard ID --confirm] [--json]
-  ewasd migrate-legacy [--workspace PATH] [--scan-root PATH ...] [--apply]
-  ewasd serve      [--listen 127.0.0.1:7337] [--token TOKEN] [--tls-cert PEM --tls-key PEM]
+  ewasd mcp        # run a Model Context Protocol server over stdio
+  ewasd completion [bash|fish|zsh] [--install]  # print or install shell completions
+
+Global flag, accepted before or after any subcommand above except
+completion/help/version:
+  --workspace PATH  # overrides all other workspace/data-root resolution
 
 Destructive operations are preview-first. link is the exception: it applies
-only missing symlinks and never replaces conflicts. migrate-legacy reads but
-never changes the old workspace; it copies sources and retires generated marker
-files in checkouts.
+only missing symlinks and never replaces a conflict.
 `)
 }

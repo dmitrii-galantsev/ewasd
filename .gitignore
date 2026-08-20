@@ -1,30 +1,11 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-*.egg
-dist/
-build/
-
 # Nix build output
 result
 result-*
 
-# Test / coverage
-.pytest_cache/
-.mypy_cache/
-.coverage
-htmlcov/
-
-# Virtual environments
-.venv/
-venv/
-
-# Go / browser verification
-node_modules/
-playwright-report/
-test-results/
-browser-artifacts/
+# Go
+/ewasd
+*.test
+*.out
 
 # IDEs and editors
 .vscode/

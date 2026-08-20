@@ -15,8 +15,6 @@ tree; its Git history and retained user workspace remain rollback sources.
 | Open-source research | `AUDIT.md` records GitHub/Kagi research into chezmoi, GNU Stow, Dotter, yadm, LazyDot, DotState, restic, Jujutsu, Syncthing, and trovl. |
 | Terra subagents | Independent Terra sessions covered architecture failure modes, open-source design research, and desktop product design without blocking implementation. |
 | Opus consultation and review | Opus performed two adversarial reviews. Reproduced P0/P1 findings and the two follow-up regressions are recorded with their remediations in `AUDIT.md`. |
-| Desktop UI | Playwright projects: 1440×1000 and 2560×1440. Chrome MCP checked centered layout, overflow, console, and Lighthouse. |
-| Extensive Chrome testing | `tests/browser/console.spec.js` uses real Chromium, real Git fixtures, the real Go binary, axe, screenshots, and mutation flows. CI installs Chromium and runs it. |
 
 ## Reproducible gates
 
@@ -27,17 +25,9 @@ go test -race ./...
 go test -race -count=20 ./internal/engine ./internal/store ./internal/httpapi
 go vet ./...
 test -z "$(gofmt -l .)"
-npm ci
-npm audit
-npm run test:browser
 nix flake check --no-build
 nix build
 ```
-
-The browser suite runs the applicable desktop interaction and accessibility
-cases at both 1440×1000 and 2560×1440; all cases pass.
-It writes screenshots to `browser-artifacts/responsive/` and failure diagnostics
-to `test-results/`/`playwright-report/`.
 
 The replacement fixture is also a release gate:
 

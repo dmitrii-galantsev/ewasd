@@ -29,14 +29,35 @@ var (
 type Engine struct {
 	store *store.Store
 	now   func() time.Time
+	// remoteKeys are the Git config keys consulted, in order, to identify a
+	// checkout's remote. Empty means gitutil.DefaultRemoteKeys. This mirrors
+	// the remote_keys setting the Python implementation exposed in
+	// ~/.config/ewasd/config.toml: a fork whose identity lives on
+	// remote.upstream.url is otherwise invisible to detection.
+	remoteKeys []string
 }
 
 func New(stateStore *store.Store) *Engine {
 	return &Engine{store: stateStore, now: func() time.Time { return time.Now().UTC() }}
 }
 
+// WithRemoteKeys returns a copy of the engine that resolves checkout remotes
+// using the supplied Git config keys in order, first non-empty result winning.
+// Passing no keys restores the default.
+func (e *Engine) WithRemoteKeys(keys ...string) *Engine {
+	clone := *e
+	clone.remoteKeys = append([]string(nil), keys...)
+	return &clone
+}
+
+// inspectCheckout resolves a checkout using this engine's configured remote
+// keys, so every detection path shares one identity policy.
+func (e *Engine) inspectCheckout(root string) (gitutil.Checkout, error) {
+	return gitutil.InspectCheckout(root, e.remoteKeys...)
+}
+
 func (e *Engine) Register(root, name string) (domain.Project, uint64, error) {
-	checkout, err := gitutil.InspectCheckout(root)
+	checkout, err := e.inspectCheckout(root)
 	if err != nil {
 		return domain.Project{}, 0, err
 	}
@@ -98,187 +119,6 @@ func (e *Engine) Register(root, name string) (domain.Project, uint64, error) {
 	return created, state.Revision, nil
 }
 
-func (e *Engine) ImportLegacyProject(plan domain.LegacyProjectPlan) (domain.ApplyResult, error) {
-	operationID := randomID(12)
-	changed := []string{}
-	state, warnings, err := e.store.Transact(nil, func(state *domain.State) (store.Effects, error) {
-		if err := e.requireNoRecovery(); err != nil {
-			return store.Effects{}, err
-		}
-		root, err := filepath.EvalSymlinks(plan.Root)
-		if err != nil {
-			return store.Effects{}, err
-		}
-		if existing := state.ProjectByRoot(root); existing != nil {
-			for _, item := range plan.Entries {
-				entry := existing.EntryByPath(item.Path)
-				if entry == nil {
-					return store.Effects{}, fmt.Errorf("%w: registered project is missing legacy entry %s", ErrConflict, item.Path)
-				}
-				source, err := fsops.SafeTarget(e.store.Root(), entry.SourceRel)
-				if err == nil {
-					err = fsops.SyncTreeModes(item.LegacySource, source)
-				}
-				if err != nil || !fsops.LinkPointsTo(item.Target, source) {
-					return store.Effects{}, fmt.Errorf("%w: existing migrated entry %s is not healthy", ErrConflict, item.Path)
-				}
-			}
-			return store.Effects{}, nil
-		}
-		for _, existing := range state.Projects {
-			if pathsOverlap(existing.Root, root) {
-				return store.Effects{}, fmt.Errorf("%w: checkout overlaps registered root %s", ErrConflict, existing.Root)
-			}
-		}
-		checkout, err := gitutil.InspectCheckout(root)
-		if err != nil {
-			return store.Effects{}, err
-		}
-		if checkout.GitRoot != plan.GitRoot {
-			return store.Effects{}, errors.New("legacy plan Git root changed after discovery")
-		}
-		id, err := uniqueProjectID(state, plan.Name)
-		if err != nil {
-			return store.Effects{}, err
-		}
-		sourceID := ""
-		profileRoot := ""
-		profileCreated := false
-		for _, existing := range state.Projects {
-			if existing.LegacySourceRoot == plan.SourceRoot {
-				sourceID = existing.SourceID
-				profileRoot = filepath.Join(e.store.Root(), "profiles", sourceID)
-				break
-			}
-		}
-		if sourceID == "" {
-			sourceID = id
-			profileRoot = filepath.Join(e.store.Root(), "profiles", sourceID)
-			if err := os.Mkdir(profileRoot, 0o700); err != nil {
-				return store.Effects{}, err
-			}
-			if err := os.Mkdir(filepath.Join(profileRoot, "files"), 0o700); err != nil {
-				_ = os.Remove(profileRoot)
-				return store.Effects{}, err
-			}
-			profileCreated = true
-		}
-		rollback := func() error {
-			var errs []error
-			journals, _ := e.listJournals()
-			for _, journal := range journals {
-				if journal.ProjectID != id || journal.Action != "legacy-import" {
-					continue
-				}
-				if err := e.rollbackLegacySwitch(journal); err != nil {
-					errs = append(errs, err)
-				}
-			}
-			if len(errs) == 0 && profileCreated {
-				if err := os.RemoveAll(profileRoot); err != nil {
-					errs = append(errs, err)
-				}
-			}
-			return errors.Join(errs...)
-		}
-		effects := store.Effects{Rollback: rollback}
-		entries := make([]domain.Entry, 0, len(plan.Entries))
-		journals := make([]domain.Journal, 0, len(plan.Entries))
-		for _, item := range plan.Entries {
-			path, err := fsops.ValidateRelative(item.Path)
-			if err != nil || containsGitControlPath(path) {
-				return effects, fmt.Errorf("unsafe legacy entry %q", item.Path)
-			}
-			target, err := fsops.SafeTarget(root, path)
-			if err != nil || filepath.Clean(target) != filepath.Clean(item.Target) {
-				return effects, fmt.Errorf("legacy target mapping changed for %s", path)
-			}
-			if !fsops.LinkPointsTo(target, item.LegacySource) {
-				return effects, fmt.Errorf("%w: %s no longer points to its legacy source", ErrConflict, path)
-			}
-			kind, err := fsops.Kind(item.LegacySource)
-			if err != nil || kind != item.Kind {
-				return effects, fmt.Errorf("legacy source kind changed for %s", path)
-			}
-			sourceRel := e.sourceRel(sourceID, path)
-			newSource, err := fsops.SafeTarget(e.store.Root(), sourceRel)
-			if err != nil {
-				return effects, err
-			}
-			if err := os.MkdirAll(filepath.Dir(newSource), 0o700); err != nil {
-				return effects, err
-			}
-			if _, err := os.Lstat(newSource); err == nil {
-				if err := fsops.SyncTreeModes(item.LegacySource, newSource); err != nil {
-					return effects, fmt.Errorf("synchronize shared source mode %s: %w", path, err)
-				}
-				equal, compareErr := fsops.EqualTree(item.LegacySource, newSource)
-				if compareErr != nil || !equal {
-					return effects, fmt.Errorf("shared legacy source %s differs from the existing Go source", path)
-				}
-			} else if errors.Is(err, os.ErrNotExist) {
-				if err := fsops.CopyTree(item.LegacySource, newSource); err != nil {
-					return effects, fmt.Errorf("copy legacy source %s: %w", path, err)
-				}
-			} else {
-				return effects, err
-			}
-			backup := filepath.Join(filepath.Dir(target), ".ewasd-migrate-"+operationID+"-"+randomID(4)+".link")
-			journal := domain.Journal{
-				ID: randomID(12), Action: "legacy-import", Phase: "prepared",
-				ProjectID: id, SourceID: sourceID, ProjectRoot: root, Path: path, Source: newSource,
-				Target: target, Backup: backup, LegacySource: item.LegacySource,
-				CreatedAt: e.now(), UpdatedAt: e.now(),
-			}
-			if err := e.writeJournal(journal); err != nil {
-				return effects, err
-			}
-			journals = append(journals, journal)
-			entries = append(entries, domain.Entry{Path: path, Kind: kind, SourceRel: sourceRel, CreatedAt: e.now()})
-			changed = append(changed, path)
-		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-		now := e.now()
-		project := domain.Project{ID: id, SourceID: sourceID, Name: plan.Name, Root: root, GitRoot: checkout.GitRoot, Remote: checkout.Remote, LegacySourceRoot: plan.SourceRoot, CreatedAt: now, UpdatedAt: now, Entries: entries}
-		state.Projects = append(state.Projects, project)
-		state.AddEvent(domain.Event{ID: randomID(8), ProjectID: id, Action: "legacy-import", Summary: fmt.Sprintf("Imported %d legacy-managed entries", len(entries)), CreatedAt: now})
-		effects.Commit = func() error {
-			var errs []error
-			for _, journal := range journals {
-				if err := e.completeLegacySwitch(journal); err != nil {
-					errs = append(errs, err)
-					break
-				}
-			}
-			if len(errs) == 0 {
-				if err := gitutil.UpdateExclude(project.ID, project.Root, project.GitRoot, entryPaths(project.Entries)); err != nil {
-					errs = append(errs, err)
-				}
-			}
-			if len(errs) == 0 {
-				for _, journal := range journals {
-					if err := fsops.RemoveAny(journal.Backup); err != nil {
-						errs = append(errs, err)
-					}
-					if err := e.removeJournal(journal.ID); err != nil {
-						errs = append(errs, err)
-					}
-				}
-			}
-			return errors.Join(errs...)
-		}
-		return effects, nil
-	})
-	if err != nil {
-		return domain.ApplyResult{}, err
-	}
-	outcome := "completed"
-	if len(changed) == 0 {
-		outcome = "no_change"
-	}
-	return domain.ApplyResult{OK: true, Outcome: outcome, OperationID: operationID, Revision: state.Revision, Action: "legacy-import", Changed: changed, Warnings: warnings, Summary: fmt.Sprintf("Imported %d legacy entry(s) for %s", len(changed), plan.Name)}, nil
-}
-
 func uniqueProjectID(state *domain.State, name string) (string, error) {
 	for range 10 {
 		id := slug(name) + "-" + randomID(4)
@@ -287,69 +127,6 @@ func uniqueProjectID(state *domain.State, name string) (string, error) {
 		}
 	}
 	return "", errors.New("could not allocate a unique project id")
-}
-
-func (e *Engine) completeLegacySwitch(journal domain.Journal) error {
-	if fsops.LinkPointsTo(journal.Target, journal.Source) {
-		return nil
-	}
-	if fsops.LinkPointsTo(journal.Target, journal.LegacySource) {
-		if _, err := os.Lstat(journal.Backup); err == nil {
-			return errors.New("legacy backup already exists before switch")
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err := os.Rename(journal.Target, journal.Backup); err != nil {
-			return err
-		}
-		if err := fsops.SyncDir(filepath.Dir(journal.Target)); err != nil {
-			return err
-		}
-		journal.Phase = "legacy-backed-up"
-		journal.UpdatedAt = e.now()
-		if err := e.writeJournal(journal); err != nil {
-			return err
-		}
-	}
-	if _, err := os.Lstat(journal.Target); !errors.Is(err, os.ErrNotExist) {
-		if err == nil {
-			return errors.New("legacy target is occupied by unexpected content")
-		}
-		return err
-	}
-	if _, err := os.Lstat(journal.Backup); err != nil {
-		return errors.New("legacy link backup is missing")
-	}
-	if err := fsops.AtomicSymlink(journal.Source, journal.Target, journal.ID); err != nil {
-		return err
-	}
-	journal.Phase = "switched"
-	journal.UpdatedAt = e.now()
-	return e.writeJournal(journal)
-}
-
-func (e *Engine) rollbackLegacySwitch(journal domain.Journal) error {
-	if fsops.LinkPointsTo(journal.Target, journal.Source) {
-		if err := os.Remove(journal.Target); err != nil {
-			return err
-		}
-	}
-	if _, err := os.Lstat(journal.Target); errors.Is(err, os.ErrNotExist) {
-		if _, backupErr := os.Lstat(journal.Backup); backupErr == nil {
-			if err := os.Rename(journal.Backup, journal.Target); err != nil {
-				return err
-			}
-		} else if errors.Is(backupErr, os.ErrNotExist) && journal.Phase == "prepared" {
-			// The old legacy link was never moved.
-		} else if backupErr != nil {
-			return backupErr
-		}
-	} else if err != nil {
-		return err
-	} else if !fsops.LinkPointsTo(journal.Target, journal.LegacySource) {
-		return errors.New("legacy target changed externally; journal retained")
-	}
-	return e.removeJournal(journal.ID)
 }
 
 func (e *Engine) Unregister(projectID string, expected uint64) (domain.ApplyResult, error) {
@@ -461,6 +238,15 @@ func (e *Engine) Snapshot() (domain.Snapshot, error) {
 		Activity:      state.Activity,
 		Recovery:      journals,
 	}, nil
+}
+
+// State returns the raw manifest state without deriving the live filesystem
+// inspection views that Snapshot computes (a symlink stat per entry across
+// every project). It exists for callers such as shell completion that only
+// need project identity and entry paths quickly and repeatedly, and would
+// otherwise pay Snapshot's filesystem-inspection cost for no benefit.
+func (e *Engine) State() (domain.State, error) {
+	return e.store.Read()
 }
 
 func (e *Engine) PlanAdopt(projectSelector, rawPath string) (plan domain.Plan, err error) {

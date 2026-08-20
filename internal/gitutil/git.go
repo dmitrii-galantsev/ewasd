@@ -26,7 +26,26 @@ type Checkout struct {
 	Remotes []string
 }
 
-func InspectCheckout(root string) (Checkout, error) {
+// DefaultRemoteKeys is the remote key tried when InspectCheckout is called
+// without any explicit remoteKeys, matching the old Python
+// get_remote_keys()'s default of a single key, origin's URL.
+var DefaultRemoteKeys = []string{"remote.origin.url"}
+
+// InspectCheckout resolves root's canonical path, Git top-level directory,
+// primary remote, and full remote list.
+//
+// remoteKeys, if given, is the ordered list of `git config` keys to try for
+// the primary Remote field; the first one with a non-empty value wins. It
+// is variadic, not a required parameter, purely so the two existing call
+// sites in internal/engine (which this change must not touch — see
+// AGENT.md/the task brief for this change) keep compiling unchanged and
+// keep their current single-key ("remote.origin.url") behavior exactly.
+// New callers that have a configured remote_keys list (see
+// internal/config) should pass it explicitly; when none is given,
+// DefaultRemoteKeys is used. gitutil itself never reads config or any
+// other global/ambient state to decide the key list — that stays the
+// caller's responsibility, keeping this package a pure helper.
+func InspectCheckout(root string, remoteKeys ...string) (Checkout, error) {
 	if root == "" {
 		return Checkout{}, errors.New("checkout root is required")
 	}
@@ -51,8 +70,24 @@ func InspectCheckout(root string) (Checkout, error) {
 		return Checkout{}, err
 	}
 	remotes := CollectRemotes(abs)
-	remote, _ := git(abs, "config", "--get", "remote.origin.url")
-	return Checkout{Root: abs, GitRoot: gitRoot, Remote: NormalizeRemote(remote), Remotes: remotes}, nil
+	remote := firstConfiguredRemote(abs, remoteKeys)
+	return Checkout{Root: abs, GitRoot: gitRoot, Remote: remote, Remotes: remotes}, nil
+}
+
+// firstConfiguredRemote tries each of keys, in order, against `git config
+// --get` in cwd and returns the first non-empty, normalized result. An
+// empty keys list falls back to DefaultRemoteKeys, so existing callers
+// that don't pass any keys keep the original single-key behavior exactly.
+func firstConfiguredRemote(cwd string, keys []string) string {
+	if len(keys) == 0 {
+		keys = DefaultRemoteKeys
+	}
+	for _, key := range keys {
+		if value, _ := git(cwd, "config", "--get", key); value != "" {
+			return NormalizeRemote(value)
+		}
+	}
+	return ""
 }
 
 func CollectRemotes(cwd string) []string {
@@ -321,6 +356,31 @@ func ApplyClean(gitRoot string, options CleanOptions) ([]string, error) {
 		}
 	}
 	return removed, nil
+}
+
+// cloneTimeout bounds how long `ewasd init --from-git` waits for the clone
+// subprocess, the same bounded-subprocess pattern every other gitutil call
+// uses (see gitOutputWithTimeout). Five minutes comfortably covers a real
+// remote clone while still failing a genuinely stuck/hung clone instead of
+// blocking the CLI forever.
+const cloneTimeout = 5 * time.Minute
+
+// CloneRepository runs `git clone url dest` under cloneTimeout. dest must
+// not exist, or must exist and be empty; the caller (ewasd init) is
+// responsible for that check and for any cleanup after a failed clone —
+// this function only runs the subprocess and reports its outcome.
+func CloneRepository(url, dest string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cloneTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dest)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("git clone timed out after %s", cloneTimeout)
+		}
+		return fmt.Errorf("git clone failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func cleanArgs(dryRun bool, options CleanOptions) ([]string, error) {

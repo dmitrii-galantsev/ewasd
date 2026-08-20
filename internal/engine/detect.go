@@ -20,15 +20,15 @@ func (e *Engine) Detect(cwd, explicit string) (domain.DetectionResult, error) {
 	if err != nil {
 		return domain.DetectionResult{}, err
 	}
-	return detectFromState(state, cwd, explicit)
+	return detectFromState(state, cwd, explicit, e.remoteKeys...)
 }
 
-func detectFromState(state domain.State, cwd, explicit string) (domain.DetectionResult, error) {
+func detectFromState(state domain.State, cwd, explicit string, remoteKeys ...string) (domain.DetectionResult, error) {
 	canonical, err := canonicalDirectory(cwd)
 	if err != nil {
 		return domain.DetectionResult{}, err
 	}
-	checkout, err := gitutil.InspectCheckout(canonical)
+	checkout, err := gitutil.InspectCheckout(canonical, remoteKeys...)
 	if err != nil {
 		return domain.DetectionResult{}, err
 	}

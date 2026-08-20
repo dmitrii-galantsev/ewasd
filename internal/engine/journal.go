@@ -178,52 +178,42 @@ func (e *Engine) recoverOne(state *domain.State, journal domain.Journal) (string
 			return "", errors.New("restored-link journal target is occupied by unexpected content; it was retained for manual recovery")
 		}
 		return "", errors.New("restored-link journal no longer matches the manifest and target; it was retained for manual recovery")
-	case "legacy-import":
-		if managed {
-			if err := e.completeLegacySwitch(journal); err != nil {
-				return "", err
-			}
-			if err := gitutil.UpdateExclude(project.ID, project.Root, project.GitRoot, entryPaths(project.Entries)); err != nil {
-				return "", err
-			}
-			if err := fsops.RemoveAny(journal.Backup); err != nil {
+	case "relocate":
+		// relocate only ever performs one destructive step per entry: an
+		// atomic rename of a temporary sibling symlink over Target. Before
+		// that rename, Target is completely untouched; after it succeeds,
+		// Target already equals the desired final state. There is no
+		// partially-written Target to repair, so recovery only needs to
+		// decide which side of that rename the crash landed on.
+		if _, err := os.Lstat(journal.Stage); err == nil {
+			if err := fsops.RemoveAny(journal.Stage); err != nil {
 				return "", err
 			}
 			if err := e.removeJournal(journal.ID); err != nil {
 				return "", err
 			}
-			message, summary = "completed legacy import for "+journal.Path, "Completed interrupted legacy import"
+			message, summary = "cleared an interrupted relocation of "+journal.Path+" before it touched the checkout", "Cleared interrupted relocation before it touched the checkout"
 			break
-		}
-		if err := e.rollbackLegacySwitch(journal); err != nil {
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}
-		sourceID := journal.SourceID
-		if sourceID == "" {
-			sourceID = journal.ProjectID
-		}
-		profileRoot := filepath.Join(e.store.Root(), "profiles", sourceID)
-		remaining, _ := e.listJournals()
-		hasProjectJournals := false
-		for _, candidate := range remaining {
-			if candidate.ProjectID == journal.ProjectID && candidate.Action == "legacy-import" {
-				hasProjectJournals = true
-				break
+		if fsopsLink(journal.Target, journal.Source) {
+			if err := e.removeJournal(journal.ID); err != nil {
+				return "", err
 			}
+			message, summary = "verified completed relocation of "+journal.Path, "Verified an interrupted relocation had already completed"
+			break
 		}
-		if !hasProjectJournals {
-			sourceInUse := false
-			for _, existing := range state.Projects {
-				if existing.SourceID == sourceID {
-					sourceInUse = true
-					break
-				}
+		if fsopsLink(journal.Target, journal.OldSource) {
+			// The rename was never even attempted; Target is exactly what
+			// it was before this relocate call started. Nothing to revert.
+			if err := e.removeJournal(journal.ID); err != nil {
+				return "", err
 			}
-			if !sourceInUse {
-				_ = os.RemoveAll(profileRoot)
-			}
+			message, summary = "cleared an interrupted relocation of "+journal.Path+" before it touched the checkout", "Cleared interrupted relocation before it touched the checkout"
+			break
 		}
-		message, summary = "rolled back legacy import for "+journal.Path, "Rolled back interrupted legacy import"
+		return "", errors.New("relocate journal's destination no longer matches either the old or the new source; it was retained for manual recovery")
 	default:
 		return "", errors.New("unknown transaction journal action; journal was retained")
 	}
@@ -274,27 +264,18 @@ func (e *Engine) DiscardJournal(id string) (string, error) {
 
 func (e *Engine) validateJournal(state domain.State, journal domain.Journal) error {
 	project := state.ProjectByID(journal.ProjectID)
-	if project == nil && journal.Action != "legacy-import" {
+	if project == nil {
 		return errors.New("recorded project no longer exists")
 	}
 	path, err := fsops.ValidateRelative(journal.Path)
 	if err != nil {
 		return err
 	}
-	projectRoot := journal.ProjectRoot
-	if project != nil {
-		projectRoot = project.Root
-	}
+	projectRoot := project.Root
 	if projectRoot == "" {
 		return errors.New("journal has no project root")
 	}
-	sourceID := journal.SourceID
-	if project != nil {
-		sourceID = project.SourceID
-	}
-	if sourceID == "" {
-		sourceID = journal.ProjectID
-	}
+	sourceID := project.SourceID
 	expectedSource, err := fsops.SafeTarget(e.store.Root(), e.sourceRel(sourceID, path))
 	if err != nil {
 		return err
@@ -332,18 +313,23 @@ func (e *Engine) validateJournal(state domain.State, journal domain.Journal) err
 		if journal.Stage != "" || journal.Backup != "" || journal.Archive != "" {
 			return errors.New("reconcile journal contains unexpected backup paths")
 		}
-	case "legacy-import":
-		if journal.Phase != "prepared" && journal.Phase != "legacy-backed-up" && journal.Phase != "switched" {
-			return errors.New("invalid legacy import journal phase")
+	case "relocate":
+		if journal.Phase != "prepared" && journal.Phase != "staged" {
+			return errors.New("invalid relocate journal phase")
 		}
-		if journal.LegacySource == "" || !filepath.IsAbs(journal.LegacySource) {
-			return errors.New("legacy import journal has an invalid legacy source")
+		if journal.Backup != "" || journal.Archive != "" {
+			return errors.New("relocate journal contains unexpected backup or archive paths")
 		}
-		if filepath.Dir(journal.Backup) != filepath.Dir(expectedTarget) || !strings.HasPrefix(filepath.Base(journal.Backup), ".ewasd-migrate-") || !strings.HasSuffix(journal.Backup, ".link") {
-			return errors.New("legacy import backup is not an expected target sibling")
+		if journal.OldSource == "" {
+			return errors.New("relocate journal is missing its recorded old source")
 		}
-		if journal.Stage != "" || journal.Archive != "" {
-			return errors.New("legacy import journal contains unexpected stage or archive paths")
+		expectedStage := filepath.Join(filepath.Dir(expectedTarget), ".ewasd-"+journal.ID+".relocate")
+		if filepath.Clean(journal.Stage) != filepath.Clean(expectedStage) {
+			return errors.New("stage path is outside the expected operation location")
+		}
+		expectedSourceSuffix := string(filepath.Separator) + filepath.FromSlash(e.sourceRel(sourceID, path))
+		if !strings.HasSuffix(filepath.Clean(journal.OldSource), expectedSourceSuffix) {
+			return errors.New("recorded old source does not match this entry's source path")
 		}
 	default:
 		return errors.New("unknown journal action")

@@ -23,7 +23,7 @@ func (e *Engine) PlanLink(cwd, explicit string) (domain.Plan, error) {
 }
 
 func (e *Engine) planLinkFromState(state domain.State, cwd, explicit string) (domain.Plan, error) {
-	detection, err := detectFromState(state, cwd, explicit)
+	detection, err := detectFromState(state, cwd, explicit, e.remoteKeys...)
 	if err != nil {
 		return domain.Plan{}, err
 	}

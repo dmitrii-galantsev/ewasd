@@ -1,5 +1,13 @@
 # Python-to-Go migration record
 
+*Historical record, updated 2026-08-19. This file documents the one-time
+Python-to-Go workstation migration executed 2026-08-17, including the
+data-integrity receipts and rollback pointers produced at the time. It
+describes the system as of v1.0. The migration tooling itself
+(`internal/legacy/`, the `ewasd migrate-legacy` subcommand,
+`scripts/replace-python-with-go.sh`) was removed in v1.2; see README.md for
+the current CLI reference.*
+
 The workstation migration was executed on 2026-08-17 with
 `scripts/replace-python-with-go.sh` after two Opus reviews and a faithful
 rehearsal using the real legacy data shapes.
@@ -54,8 +62,9 @@ source, but no live migrated link points to it.
 
 ## Post-migration UI verification
 
-The installed binary served the real seven-project state and was checked with
-Chrome MCP and Lighthouse:
+At the time of migration, the installed binary also served a local web
+console (removed in v1.2; see note at top of file). That console served the
+real seven-project state and was checked with Chrome MCP and Lighthouse:
 
 - no horizontal overflow;
 - no visible target below 44×44 CSS pixels;
@@ -63,3 +72,17 @@ Chrome MCP and Lighthouse:
 - all seven projects available with duplicate worktree names disambiguated;
 - Lighthouse: 100 accessibility, 100 best practices, 100 SEO, and 100 agentic
   browsing.
+
+## Current status
+
+The tooling that produced this record — `internal/legacy/`, the
+`ewasd migrate-legacy` subcommand, and `scripts/replace-python-with-go.sh` —
+was removed in v1.2. The migration was a one-time operation on this
+workstation and the tooling had no further use once it completed. This file,
+together with the retained `~/.local/share/ewasd/` Python workspace, is the
+remaining rollback record. The one live remnant of the migration is the
+`legacy_source_root` field on each project in `state.json` (and the
+corresponding `Project.LegacySourceRoot` struct field): it carries forward for
+7 of the 8 projects in the live manifest and is deliberately retained because
+`internal/engine/link.go` still uses it for shared-source inference across
+worktrees.

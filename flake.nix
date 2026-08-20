@@ -13,7 +13,7 @@
       packages = forAllSystems (_system: pkgs: {
         ewasd = pkgs.buildGoModule {
           pname = "ewasd";
-          version = "1.1.0";
+          version = "2.0.0";
           src = ./.;
           vendorHash = null;
           subPackages = [ "cmd/ewasd" ];
@@ -44,7 +44,7 @@
 
       devShells = forAllSystems (_system: pkgs: {
         default = pkgs.mkShell {
-          packages = [ pkgs.go pkgs.git pkgs.nodejs_22 ];
+          packages = [ pkgs.go pkgs.git ];
         };
       });
 

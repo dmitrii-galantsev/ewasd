@@ -193,6 +193,90 @@ func TestRemovingFirstOfTwoBlocksPreservesBoundaryAndOriginalBytes(t *testing.T)
 	}
 }
 
+func TestInspectCheckoutDefaultsToOriginWhenNoKeysGiven(t *testing.T) {
+	t.Parallel()
+	repo := initRepo(t)
+	runGitCommand(t, repo, "remote", "add", "origin", "git@github.com:Example/Widget.git")
+	checkout, err := InspectCheckout(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkout.Remote != "github.com/example/widget" {
+		t.Fatalf("Remote = %q", checkout.Remote)
+	}
+}
+
+func TestInspectCheckoutTriesConfiguredKeysInOrderFirstNonEmptyWins(t *testing.T) {
+	t.Parallel()
+	repo := initRepo(t)
+	// No "remote.origin.url" configured at all; only upstream is set, so
+	// the second configured key should be the one that wins.
+	runGitCommand(t, repo, "remote", "add", "upstream", "git@github.com:Example/Upstream.git")
+	checkout, err := InspectCheckout(repo, "remote.origin.url", "remote.upstream.url")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkout.Remote != "github.com/example/upstream" {
+		t.Fatalf("Remote = %q, want upstream to win when origin is unset", checkout.Remote)
+	}
+}
+
+func TestInspectCheckoutPrefersEarlierConfiguredKeyWhenBothPresent(t *testing.T) {
+	t.Parallel()
+	repo := initRepo(t)
+	runGitCommand(t, repo, "remote", "add", "origin", "git@github.com:Example/Origin.git")
+	runGitCommand(t, repo, "remote", "add", "upstream", "git@github.com:Example/Upstream.git")
+	checkout, err := InspectCheckout(repo, "remote.origin.url", "remote.upstream.url")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkout.Remote != "github.com/example/origin" {
+		t.Fatalf("Remote = %q, want the first configured key (origin) to win", checkout.Remote)
+	}
+}
+
+func TestInspectCheckoutRemoteEmptyWhenNoConfiguredKeyIsSet(t *testing.T) {
+	t.Parallel()
+	repo := initRepo(t)
+	checkout, err := InspectCheckout(repo, "remote.origin.url")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkout.Remote != "" {
+		t.Fatalf("Remote = %q, want empty", checkout.Remote)
+	}
+}
+
+func TestCloneRepositoryClonesLocalRepository(t *testing.T) {
+	t.Parallel()
+	source := initRepo(t)
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, source, "add", "README.md")
+	runGitCommand(t, source, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "init")
+
+	dest := filepath.Join(t.TempDir(), "clone")
+	if err := CloneRepository("file://"+source, dest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "README.md")); err != nil {
+		t.Fatalf("cloned repo missing expected file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, ".git")); err != nil {
+		t.Fatalf("cloned repo missing .git: %v", err)
+	}
+}
+
+func TestCloneRepositoryFailureReturnsDescriptiveError(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "clone")
+	err := CloneRepository(filepath.Join(t.TempDir(), "does-not-exist"), dest)
+	if err == nil {
+		t.Fatal("expected an error cloning a nonexistent source")
+	}
+}
+
 func TestCollectRemotesNormalizesAndDeduplicatesAllConfiguredRemotes(t *testing.T) {
 	t.Parallel()
 	repo := initRepo(t)

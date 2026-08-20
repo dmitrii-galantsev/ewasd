@@ -12,12 +12,17 @@ type State struct {
 }
 
 type Project struct {
-	ID               string    `json:"id"`
-	SourceID         string    `json:"source_id"`
-	Name             string    `json:"name"`
-	Root             string    `json:"root"`
-	GitRoot          string    `json:"git_root"`
-	Remote           string    `json:"remote,omitempty"`
+	ID       string `json:"id"`
+	SourceID string `json:"source_id"`
+	Name     string `json:"name"`
+	Root     string `json:"root"`
+	GitRoot  string `json:"git_root"`
+	Remote   string `json:"remote,omitempty"`
+	// LegacySourceRoot is retained state data from the 1.0 Python-to-Go
+	// migration. It is no longer written by any code path, but existing
+	// state.json entries still carry it, and internal/engine/link.go relies
+	// on it when an inferred checkout inherits a template project's shared
+	// source. Do not remove this field or its propagation in link.go.
 	LegacySourceRoot string    `json:"legacy_source_root,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
@@ -148,17 +153,26 @@ type CleanProtectedLink struct {
 }
 
 type PlanStep struct {
-	Path   string `json:"path"`
-	Action string `json:"action"`
-	From   string `json:"from,omitempty"`
-	To     string `json:"to,omitempty"`
-	Detail string `json:"detail"`
+	// ProjectID disambiguates steps in a plan that spans multiple projects
+	// (currently only "relocate", whose plan can cover every registered
+	// checkout at once). It is empty for single-project plan actions, where
+	// Path alone is already unambiguous.
+	ProjectID string `json:"project_id,omitempty"`
+	Path      string `json:"path"`
+	Action    string `json:"action"`
+	From      string `json:"from,omitempty"`
+	To        string `json:"to,omitempty"`
+	Detail    string `json:"detail"`
 }
 
 type Conflict struct {
-	Path   string `json:"path"`
-	Reason string `json:"reason"`
-	Detail string `json:"detail"`
+	// ProjectID disambiguates conflicts in a plan that spans multiple
+	// projects (currently only "relocate"). It is empty for single-project
+	// plan actions, where Path alone is already unambiguous.
+	ProjectID string `json:"project_id,omitempty"`
+	Path      string `json:"path"`
+	Reason    string `json:"reason"`
+	Detail    string `json:"detail"`
 }
 
 type ApplyResult struct {
@@ -174,60 +188,27 @@ type ApplyResult struct {
 }
 
 type Journal struct {
-	ID           string    `json:"id"`
-	Action       string    `json:"action"`
-	Phase        string    `json:"phase"`
-	ProjectID    string    `json:"project_id"`
-	SourceID     string    `json:"source_id,omitempty"`
-	Path         string    `json:"path"`
-	Source       string    `json:"source"`
-	Target       string    `json:"target"`
-	Stage        string    `json:"stage,omitempty"`
-	Backup       string    `json:"backup,omitempty"`
-	Archive      string    `json:"archive,omitempty"`
-	LegacySource string    `json:"legacy_source,omitempty"`
-	ProjectRoot  string    `json:"project_root,omitempty"`
-	ExpectedRev  uint64    `json:"expected_revision"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-}
-
-type LegacyMigrationPlan struct {
-	LegacyWorkspace string              `json:"legacy_workspace"`
-	ScanRoots       []string            `json:"scan_roots"`
-	Projects        []LegacyProjectPlan `json:"projects"`
-	Markers         []LegacyMarkerPlan  `json:"markers"`
-	Skipped         []LegacySkippedItem `json:"skipped"`
-}
-
-type LegacyProjectPlan struct {
-	Name       string            `json:"name"`
-	Root       string            `json:"root"`
-	GitRoot    string            `json:"git_root"`
-	Remote     string            `json:"remote,omitempty"`
-	SourceRoot string            `json:"source_root"`
-	Entries    []LegacyEntryPlan `json:"entries"`
-}
-
-type LegacyEntryPlan struct {
-	Path         string `json:"path"`
-	Kind         string `json:"kind"`
-	LegacySource string `json:"legacy_source"`
-	Target       string `json:"target"`
-}
-
-type LegacyMarkerPlan struct {
-	Path     string   `json:"path"`
-	GitRoot  string   `json:"git_root"`
-	Entries  []string `json:"entries"`
-	Residual []string `json:"residual"`
-}
-
-type LegacySkippedItem struct {
-	Marker   string `json:"marker,omitempty"`
-	Path     string `json:"path,omitempty"`
-	Reason   string `json:"reason"`
-	Blocking bool   `json:"blocking"`
+	ID        string `json:"id"`
+	Action    string `json:"action"`
+	Phase     string `json:"phase"`
+	ProjectID string `json:"project_id"`
+	Path      string `json:"path"`
+	Source    string `json:"source"`
+	Target    string `json:"target"`
+	Stage     string `json:"stage,omitempty"`
+	Backup    string `json:"backup,omitempty"`
+	Archive   string `json:"archive,omitempty"`
+	// OldSource is the absolute path a "relocate" journal's Target symlink
+	// pointed at under the old data root before it was retargeted to
+	// Source under the current data root. It is empty for every other
+	// action. Recording it lets a live rollback (a later step in the same
+	// relocate call failing) swap a completed step back to its exact prior
+	// value without needing the original --old-workspace argument in
+	// scope.
+	OldSource   string    `json:"old_source,omitempty"`
+	ExpectedRev uint64    `json:"expected_revision"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func NewState() State {

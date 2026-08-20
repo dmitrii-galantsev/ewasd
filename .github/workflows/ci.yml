@@ -32,31 +32,6 @@ jobs:
       - run: go test -race ./...
       - run: go build ./cmd/ewasd
 
-  browser:
-    name: Chromium responsive and accessibility
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:browser
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ewasd-browser-results
-          path: |
-            browser-artifacts/
-            playwright-report/
-            test-results/
-          if-no-files-found: ignore
-
   nix:
     name: Nix package and smoke test
     runs-on: ubuntu-latest
@@ -66,14 +41,3 @@ jobs:
       - run: nix flake check
       - run: nix build .#ewasd
       - run: ./result/bin/ewasd --version
-
-  replacement-script:
-    name: Python-to-Go replacement fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: DeterminateSystems/nix-installer-action@v17
-      - run: bash tests/replacement/run-fixture.sh

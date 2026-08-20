@@ -1,5 +1,15 @@
 # System audit and replacement decision
 
+*Historical record, updated 2026-08-19. This document analyzes the original
+Python implementation and records the design and review process behind the
+v1.0 Python-to-Go rewrite, including the workstation migration completed
+2026-08-17. It describes the system as it existed at v1.0. The local web
+console (`internal/httpapi/`, the `ewasd serve` subcommand, the Playwright
+browser-test suite) and the one-shot Python-to-Go migration tooling
+(`internal/legacy/`, the `ewasd migrate-legacy` subcommand,
+`scripts/replace-python-with-go.sh`) discussed below were both removed in
+v1.2. See README.md for the current CLI reference.*
+
 ## Executive conclusion
 
 The recurring breakage is not one `already exists` branch. The current system
@@ -137,9 +147,9 @@ Research used GitHub CLI against primary project repositories on 2026-08-17.
   a product concept instead of an implementation detail. The replacement keeps
   a bounded activity log plus durable in-flight journals.
 - [Syncthing](https://github.com/syncthing/syncthing) (87k+): a single local
-  daemon serving an embedded responsive UI is operationally simple. The new web
-  console uses the same engine as the CLI, but exposes no generic filesystem or
-  command-execution API.
+  daemon serving an embedded responsive UI is operationally simple. The v1.0
+  web console (removed in v1.2, see note at top of file) used the same engine
+  as the CLI while exposing no generic filesystem or command-execution API.
 - [trovl](https://github.com/sneha-afk/trovl): its explicit JSON link manifest
   and separate `plan` (`apply --dry-run`) command independently reinforce the
   plan/apply boundary. Its direct arbitrary-path linker is intentionally broader
@@ -150,34 +160,36 @@ search helper was discovered and used. It surfaced trovl's current plan/apply
 design and local web file-manager comparisons; GitHub CLI and upstream primary
 documentation were then used to verify the relevant designs.
 
-## UX decision
+## UX decision (web console, removed in v1.2)
 
-The UI is an **operations console**, not a file manager:
-
-- desktop: persistent repository rail, health summary, entry table, and activity
-  context;
-- every write begins in a preview dialog that names the current
-  object, expected state revision, conflicts, and non-overwrite guarantee;
-- errors remain next to the action and include a recovery instruction;
-- status never relies on color alone, focus is visible, live updates use ARIA,
-  and reduced-motion preferences are respected.
+The v1.0 web console was designed as an **operations console**, not a file
+manager: a desktop layout gave a persistent repository rail, health summary,
+entry table, and activity context; every write began in a preview dialog that
+named the current object, expected state revision, conflicts, and
+non-overwrite guarantee; errors stayed next to the action with a recovery
+instruction; and status never relied on color alone, focus was visible, live
+updates used ARIA, and reduced-motion preferences were respected.
 
 Generic path browsing, source editing, uploads, terminal access, Git push, and
-deletion were dropped. They add broad remote power while doing little to make
-link ownership reliable.
+deletion were deliberately excluded from that surface, since they add broad
+remote power while doing little to make link ownership reliable. The console
+itself (`internal/httpapi/`) was removed in v1.2 as unused overhead; none of
+it served the safety model this rewrite existed to deliver.
 
 ## Parallel evaluation criteria
 
-Before replacing ewasd, use disposable clones and require:
+Before replacing the Python ewasd with the Go implementation, disposable
+clones were used and the following was required:
 
 - all unit, race, HTTP contract, and crash-recovery tests pass;
 - every mutation remains recoverable after forced interruption at each journal
   phase;
 - conflicts never change local bytes;
-- a stale browser tab cannot apply a plan after the revision changes;
+- a stale browser tab cannot apply a plan after the revision changes (web
+  console; that surface was removed in v1.2);
 - existing `.git/info/exclude` content survives all operations;
 - desktop layouts show no horizontal overflow, clipped actions, console errors,
-  or inaccessible controls;
+  or inaccessible controls (web console; that surface was removed in v1.2);
 - the old ewasd data root and every ewasd-owned path remain unchanged.
 
 ## Independent review closure
@@ -198,9 +210,10 @@ parallel implementation was changed before final verification:
   neighboring file is not hidden;
 - a deterministic plan fingerprint binds the concrete step/conflict set.
   Reconcile aborts if any additional filesystem drift appears after review;
-- the web API now always requires a generated 256-bit token, validates an
-  explicit Host allowlist, checks browser origin/fetch metadata, consumes a
-  one-use plan ID, and supports TLS directly;
+- the web API (removed in v1.2 along with the console) had always required a
+  generated 256-bit token, validated an explicit Host allowlist, checked
+  browser origin/fetch metadata, consumed a one-use plan ID, and supported TLS
+  directly;
 - unresolved journals can be explicitly archived only after confirmation,
   without touching source or target paths, so recovery cannot wedge all future
   writes permanently;
@@ -231,23 +244,27 @@ record of earlier completed recovery, and Git exclude separator metadata is
 recognized only inside this project's marker block, preserving an identical
 user line byte-for-byte. Regression tests cover both cases.
 
-The final completion pass added the missing browser release gate rather than
-leaving the manual Chrome evidence as a one-time claim. A Playwright fixture now
-builds the real binary, creates two temporary Git repositories, registers and
-adopts through the CLI, serves the embedded UI with mandatory authentication,
-and exercises real Chromium at standard and 1440p desktop sizes.
-The suite checks overflow, 44px targets, console/page errors, axe WCAG findings,
-repository switching, activity and safety screens, modal accessibility,
-blocked no-op plans, plan/apply/activity flow, and rejection of a reconcile plan
-whose filesystem step set changed after review. CI runs these tests and uploads
-screenshots/traces; a separate Nix job builds the independent flake.
+The final completion pass for v1.0 added a browser release gate rather than
+leaving the manual Chrome evidence as a one-time claim: a Playwright fixture
+built the real binary, registered and adopted through the CLI, served the
+embedded UI with mandatory authentication, and exercised real Chromium at
+standard and 1440p desktop sizes, checking overflow, 44px targets, console/page
+errors, axe WCAG findings, repository switching, activity and safety screens,
+modal accessibility, blocked no-op plans, plan/apply/activity flow, and
+rejection of a reconcile plan whose filesystem step set changed after review.
+CI ran these tests and uploaded screenshots/traces alongside a separate Nix
+flake build. This suite, the embedded UI it exercised, and the `browser` CI
+job were all removed in v1.2 along with the web console; the plan/apply/journal
+invariants it checked are still covered by the Go engine's own test suite.
 
-## Promotion and Python-to-Go migration
+## Promotion and Python-to-Go migration (migration tooling removed in v1.2)
 
 After the parallel gate passed, the Go implementation was promoted to the
 repository root and the Python package, Python tests, setuptools metadata, and
-Python-oriented CI were removed. The migration design intentionally does not
-reinterpret all files in the old central source tree:
+Python-oriented CI were removed. The one-time migration tool that performed
+this (`internal/legacy/`, the `ewasd migrate-legacy` subcommand — removed in
+v1.2, see note at top of file) intentionally did not reinterpret all files in
+the old central source tree:
 
 1. Parse the narrow legacy `editors.toml` schema with a rejecting Go parser.
 2. Scan only explicit roots for files carrying the exact generated
@@ -266,36 +283,37 @@ reinterpret all files in the old central source tree:
 8. Write a migration receipt and leave the old Python workspace intact as a
    rollback source.
 
-`scripts/replace-python-with-go.sh` builds and activates Go ewasd before
-mutating any legacy links. Nix installations first attempt `nix profile upgrade`; when
-an old locked or raw-store element cannot upgrade, Go ewasd is added at higher
-priority and verified before the hidden Python element is removed. Thus the
-command is never absent and both profile generations remain rollback points.
-The fixture's copy mode uses a staged executable and atomic rename. CI exercises
-the complete fixture.
+`scripts/replace-python-with-go.sh` (removed in v1.2) built and activated Go
+ewasd before mutating any legacy links. Nix installations first attempted
+`nix profile upgrade`; when an old locked or raw-store element could not
+upgrade, Go ewasd was added at higher priority and verified before the hidden
+Python element was removed, so the command was never absent and both profile
+generations remained rollback points. The fixture's copy mode used a staged
+executable and atomic rename, and CI exercised the complete fixture while the
+script existed.
 
-The installer also avoids a subtle Nix disclosure hazard: `path:<checkout>`
+The installer also avoided a subtle Nix disclosure hazard: `path:<checkout>`
 copies ignored and untracked files into the world-readable Nix store. The
-replacement script constructs a persistent allowlisted source tree containing
-only flake metadata, `go.mod`, `cmd/`, and `internal/`, and builds/installs that
-snapshot instead of the checkout.
+replacement script constructed a persistent allowlisted source tree containing
+only flake metadata, `go.mod`, `cmd/`, and `internal/`, and built/installed
+that snapshot instead of the checkout.
 
 ### Migration review closure
 
 A third Opus gate focused specifically on the real Python-to-Go migration and
 initially blocked execution. Its findings drove additional changes:
 
-- shared legacy `link_dir` values now produce one `SourceID`, preserving
+- shared legacy `link_dir` values produced one `SourceID`, preserving
   cross-worktree sharing instead of silently splitting it;
-- marker finalization is grouped by Git common-dir, preserves residual ignore
-  semantics, and uses its own resumable synced journal;
-- hand-written foreign marker files are skipped rather than aborting a scan;
+- marker finalization was grouped by Git common-dir, preserved residual ignore
+  semantics, and used its own resumable synced journal;
+- hand-written foreign marker files were skipped rather than aborting a scan;
 - the Nix package explicitly runs `go test ./...` instead of testing only the
-  command package;
-- Go is activated before link mutation, mode combinations are preflighted, and
-  both raw-store and flake profile replacement paths are tested without a
+  command package (still true of the current flake);
+- Go was activated before link mutation, mode combinations were preflighted,
+  and both raw-store and flake profile replacement paths were tested without a
   command-absence window;
-- the installer uses a private allowlisted source rather than leaking ignored
+- the installer used a private allowlisted source rather than leaking ignored
   checkout files into the Nix store.
 
 The follow-up review reproduced every fix and issued an explicit **GO**. It ran
