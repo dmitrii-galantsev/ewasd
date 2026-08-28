@@ -1,7 +1,22 @@
 """Shell completion templates for ewasd."""
 
+from typing import TypedDict
+
+
+class CompletionData(TypedDict):
+    """Shape of the completion data used to generate shell-specific scripts."""
+
+    main_options: list[str]
+    subcommands: dict[str, str]
+    link_options: list[str]
+    clean_options: list[str]
+    init_options: list[str]
+    migrate_options: list[str]
+    completion_shells: list[str]
+
+
 # Completion data - used to generate shell-specific completions
-COMPLETIONS = {
+COMPLETIONS: CompletionData = {
     "main_options": ["--workspace", "--project", "--add-file", "--rm-file"],
     "subcommands": {
         "link": "Link all discovered config entries (default action)",
