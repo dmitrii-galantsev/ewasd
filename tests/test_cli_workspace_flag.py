@@ -3,7 +3,7 @@
 import tomllib
 from pathlib import Path
 
-from ewasd.cli import handle_config, parse_args
+from ewasd.cli import handle_config, parse_args, workspace_vibes
 from ewasd.core import ConfigParser, init_workspace
 
 
@@ -84,3 +84,19 @@ class TestConfig:
         assert "workspace:" in output
         assert "config:" in output
         assert "remote_keys:" in output
+
+
+class TestVibes:
+    """Verify the highly actionable workspace wellness metric."""
+
+    def test_vibes_score_is_based_on_health(self):
+        healthy = type("Result", (), {"ok": True})()
+        unhealthy = type("Result", (), {"ok": False})()
+
+        assert workspace_vibes([healthy, healthy, unhealthy]) == (67, "open to alignment")
+
+    def test_vibes_for_empty_workspace_is_neutral(self):
+        assert workspace_vibes([]) == (50, "neutral")
+
+    def test_vibes_command_is_available(self):
+        assert parse_args(["vibes"]).command == "vibes"

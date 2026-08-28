@@ -56,6 +56,7 @@ ewasd separates the **tool** (this package) from your **workspace data** (config
 * `link` - Create symlinks from central configs to current directory (default)
 * `list` - Show available configs for detected repository
 * `config` - Show resolved configuration paths
+* `vibes` - Generate a holistic workspace wellness score from symlink health
 * `migrate` - Fix broken symlinks after workspace relocation
 * `clean` - Run `git clean` while preserving symlinked configs
 * `git-clean-args` - Output exclusion args for manual `git clean`
