@@ -13,9 +13,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 try:  # Optional color support
-    from termcolor import colored  # type: ignore
+    from termcolor import colored
 except Exception:  # pragma: no cover - optional dependency
 
     def colored(text: str, _color: str) -> str:  # type: ignore
@@ -37,7 +38,7 @@ def get_config_dir() -> Path:
     return base / "ewasd"
 
 
-def _read_tool_config() -> dict:  # type: ignore[type-arg]
+def _read_tool_config() -> dict[str, Any]:
     """Load ~/.config/ewasd/config.toml if it exists."""
     config_file = get_config_dir() / "config.toml"
     if config_file.exists():
@@ -86,7 +87,10 @@ def get_workspace_dir(cli_override: str | None = None) -> Path:
 def get_remote_keys() -> list[str]:
     """Load remote keys from config, default to just origin."""
     cfg = _read_tool_config()
-    return cfg.get("remote_keys", ["remote.origin.url"])
+    keys = cfg.get("remote_keys")
+    if not isinstance(keys, list):
+        return ["remote.origin.url"]
+    return [str(key) for key in keys]
 
 
 @dataclass
@@ -569,7 +573,7 @@ class ConfigParser:
             new_table = tomlkit.table()
             new_table.add("repo", git_url)
             new_table.add("link_dir", link_dir_raw)
-            doc["repos"].add(name, new_table)  # type: ignore[union-attr]
+            doc["repos"].add(name, new_table)
 
             self.toml_path.write_text(tomlkit.dumps(doc))
 

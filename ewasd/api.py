@@ -340,7 +340,9 @@ def detect(
         )
 
     git_root = _git_root(path)
-    matched_by = _explain_match(name, project, path, known, git_root, remotes, trace)
+    matched_by = _explain_match(
+        name, project, path, known=known, git_root=git_root, remotes=remotes, trace=trace
+    )
 
     return DetectResult(
         ok=name is not None,
@@ -362,6 +364,7 @@ def _explain_match(  # noqa: PLR0913 - all inputs are needed to name the winning
     name: str | None,
     project: str | None,
     path: Path,
+    *,
     known: list[str],
     git_root: str | None,
     remotes: list[str],
