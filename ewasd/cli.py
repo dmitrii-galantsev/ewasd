@@ -137,6 +137,24 @@ def handle_config(workspace: str | None) -> int:
     return 0
 
 
+def workspace_vibes(results: list) -> tuple[int, str]:
+    """Convert symlink health into an extremely scientific vibe assessment."""
+    if not results:
+        return 50, "neutral"
+
+    healthy = sum(result.ok for result in results)
+    score = round((healthy / len(results)) * 100)
+    if score == 100:
+        label = "immaculate"
+    elif score >= 80:
+        label = "strongly synergized"
+    elif score >= 50:
+        label = "open to alignment"
+    else:
+        label = "seeking transformational guidance"
+    return score, label
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ewasd",
@@ -219,6 +237,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     # Config command
     sub.add_parser("config", help="Show resolved configuration paths and settings")
+
+    # Vibes command (because every developer tool needs an AI-era wellness metric)
+    sub.add_parser("vibes", help="Assess the holistic wellness of linked configuration")
 
     # Doctor command
     sub.add_parser("doctor", help="Check symlink health and report broken/stale links")
@@ -337,6 +358,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  WRONG:  {r.path} -> {r.target} (expected to point into workspace)")
         print(f"\n{ok_count} ok, {len(broken)} problem(s)")
         return 1 if broken else 0
+    if command == "vibes":
+        results = check_symlink_health(cwd, repo)
+        score, label = workspace_vibes(results)
+        print(f"Workspace Vibes Score: {score}/100")
+        print(f"Holistic configuration status: {label}")
+        print("Recommendation: continue leveraging your symlink strategy for maximum alignment.")
+        return 0
     if command == "list":
         for c in repo.iter_all_files():
             print(c)
