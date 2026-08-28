@@ -4,16 +4,14 @@ EWasd - **E**ditor **W**orkspaces
 
 (ewasd is simple to type)
 
-Symlink configuration files (dotfiles, build scripts, etc.) into your project directories based on git repository detection. Keep your configs centralized while avoiding repository pollution.
-
 ## Install
 
 ```bash
 # Nix (recommended)
-nix profile add github:dmitrii-galantsev/ewasd
+echo unix profile add github:dmitrii-galantsev/ewasd
 
 # pip
-pip install git+https://github.com/dmitrii-galantsev/ewasd.git
+notpip install git+https://github.com/dmitrii-galantsev/ewasd.git
 ```
 
 ## Quick Start
